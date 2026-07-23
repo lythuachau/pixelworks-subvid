@@ -8,7 +8,9 @@
   },
   "scripts": {
     "dev": "astro dev",
+    "dev:local": "node ./scripts/dev-local.mjs",
     "build": "astro build",
+    "test": "node --experimental-strip-types --test tests/apiAdmin.test.ts tests/ocrAlignment.test.ts tests/subtitleTools.test.ts tests/speechApi.test.ts",
     "preview": "astro preview",
     "astro": "astro",
     "deploy": "astro build && wrangler deploy"
@@ -18,12 +20,12 @@
     "@astrojs/sitemap": "3.7.3",
     "@ffmpeg/ffmpeg": "0.12.15",
     "@ffmpeg/util": "0.12.2",
-    "@huggingface/transformers": "^4.2.0",
     "@tailwindcss/vite": "4.3.0",
     "astro": "6.4.2",
     "mediabunny": "1.45.4",
     "tailwind-animations": "1.0.1",
-    "tailwindcss": "4.3.0"
+    "tailwindcss": "4.3.0",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "wrangler": "4.98.0"

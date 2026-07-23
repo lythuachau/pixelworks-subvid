@@ -31,6 +31,8 @@ type EditorSegmentsOptions = {
   highlightSegment: (index: number, options?: any) => void
   updateCaption: () => void
   enableExports: (on: boolean) => void
+  onProjectChanged?: () => void
+  qualityIssuesForCue?: (lang: string, index: number) => any[]
 }
 
 export function createEditorSegmentsController(options: EditorSegmentsOptions) {
@@ -51,10 +53,34 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
     highlightSegment,
     updateCaption,
     enableExports,
+    onProjectChanged,
+    qualityIssuesForCue,
   } = options
 
   let translatingLang = ""
   let textEditSnapshot: string | null = null
+  const selectedCueKeys = new Set<string>()
+
+  const cueKey = (lang: string, index: number) => `${lang}:${index}`
+
+  function translatedTrackActive() {
+    const state = getState()
+    return !!state.activeLang && state.activeLang !== state.detectedLang
+  }
+
+  function refreshRetranslateButtons() {
+    const state = getState()
+    const hasSelection = [...selectedCueKeys].some((key) =>
+      key.startsWith(`${state.activeLang}:`),
+    )
+    ui.retranslateSelectedBtn.disabled = !translatedTrackActive() || !hasSelection
+    ui.retranslateIssuesBtn.disabled = !translatedTrackActive()
+  }
+
+  function markChanged() {
+    onProjectChanged?.()
+    refreshRetranslateButtons()
+  }
 
   function escapeHtml(value: string) {
     return String(value)
@@ -204,6 +230,7 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
       renderSegments()
       enableExports(true)
       updateCaption()
+      markChanged()
     } catch (error) {
       console.error(error)
       setLangAddStatus(tt("translationFailed"), "error")
@@ -228,6 +255,7 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
       ui.segList.innerHTML = `<li class="seg-empty">${tt("segEmpty")}</li>`
       ui.segCount.textContent = ""
       renderTimeline()
+      refreshRetranslateButtons()
       return
     }
     langs.forEach((lang) => {
@@ -240,17 +268,23 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
       }
       segments.forEach((seg, index) => {
         const li = document.createElement("li")
-        li.className = "seg"
+        const issues = qualityIssuesForCue?.(lang, index) || []
+        const selected = selectedCueKeys.has(cueKey(lang, index))
+        li.className = `seg${selected ? " is-selected" : ""}${issues.length ? " has-quality-issue" : ""}`
         li.dataset.lang = lang
         li.dataset.index = String(index)
         li.innerHTML = `
       <div class="seg-row">
+        <input class="seg-select" type="checkbox" aria-label="${tt("cueSelect")}" ${selected ? "checked" : ""} />
         <button class="seg-play" type="button" title="${tt("goTitle")}" aria-label="${tt("goAria")}">
           <svg width="11" height="11" viewBox="0 0 11 11" fill="none"><path d="M3 2l5 3.5L3 9V2z" fill="currentColor"/></svg>
         </button>
         <input class="t-input t-start" value="${formatClock(seg.start)}" aria-label="${tt("startAria")}" />
         <span class="t-sep">→</span>
         <input class="t-input t-end" value="${formatClock(seg.end)}" aria-label="${tt("endAria")}" />
+        <input class="speaker-input" value="${escapeHtml(seg.speaker || "")}" placeholder="${tt("speakerLabel")}" aria-label="${tt("speakerLabel")}" />
+        <button class="seg-split" type="button" title="${tt("splitTitle")}" aria-label="${tt("splitAria")}">↧</button>
+        <button class="seg-merge" type="button" title="${tt("mergeTitle")}" aria-label="${tt("mergeAria")}" ${index >= segments.length - 1 ? "disabled" : ""}>⇎</button>
         <button class="seg-del" type="button" title="${tt("delTitle")}" aria-label="${tt("delAria")}">✕</button>
       </div>
       <textarea class="seg-text" rows="2" spellcheck="false">${escapeHtml(seg.text)}</textarea>
@@ -262,6 +296,137 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
       ? tt("tracks.count", { n: totalSegments, count: langs.length })
       : tt("segCount", { n: totalSegments })
     renderTimeline()
+    refreshRetranslateButtons()
+  }
+
+  function splitText(text: string) {
+    const trimmed = String(text || "").trim()
+    if (!trimmed) return ["", ""]
+    const middle = Math.floor(trimmed.length / 2)
+    let cut = trimmed.indexOf(" ", middle)
+    if (cut < 0) cut = trimmed.lastIndexOf(" ", middle)
+    if (cut <= 0) cut = middle
+    return [trimmed.slice(0, cut).trim(), trimmed.slice(cut).trim()]
+  }
+
+  function splitCue(lang: string, index: number) {
+    const segments = segmentsForLang(lang)
+    const segment = segments[index]
+    if (!segment || segment.end - segment.start < 0.3) return
+    const playhead = Number(ui.video.currentTime)
+    const splitAt =
+      playhead > segment.start + 0.12 && playhead < segment.end - 0.12
+        ? playhead
+        : (segment.start + segment.end) / 2
+    const [firstText, secondText] = splitText(segment.text)
+    const before = snapshotSegments()
+    segments.splice(
+      index,
+      1,
+      { ...segment, end: splitAt, text: firstText, words: undefined },
+      { ...segment, start: splitAt, text: secondText, words: undefined },
+    )
+    selectedCueKeys.clear()
+    pushHistory(before)
+    renderSegments()
+    updateCaption()
+    markChanged()
+  }
+
+  function mergeCue(lang: string, index: number) {
+    const segments = segmentsForLang(lang)
+    const segment = segments[index]
+    const next = segments[index + 1]
+    if (!segment || !next) return
+    const before = snapshotSegments()
+    segments.splice(index, 2, {
+      ...segment,
+      end: Math.max(segment.end, next.end),
+      text: [segment.text, next.text].filter(Boolean).join(" ").trim(),
+      speaker: segment.speaker === next.speaker ? segment.speaker : undefined,
+      words: undefined,
+    })
+    selectedCueKeys.clear()
+    pushHistory(before)
+    renderSegments()
+    updateCaption()
+    markChanged()
+  }
+
+  function issueCueIndices() {
+    const state = getState()
+    const source = state.segmentsByLang[state.detectedLang] || state.baseSegments
+    const target = state.segmentsByLang[state.activeLang] || []
+    return source.flatMap((sourceSegment, index) => {
+      const segment = target[index]
+      const text = String(segment?.text || "").trim()
+      const sourceText = String(sourceSegment?.text || "").trim()
+      return !text || (sourceText && text === sourceText) ? [index] : []
+    })
+  }
+
+  async function retranslateIndices(indices: number[]) {
+    const state = getState()
+    const sourceLang = state.detectedLang
+    const targetLang = state.activeLang
+    if (!sourceLang || sourceLang === targetLang) return 0
+    const source = state.segmentsByLang[sourceLang] || state.baseSegments
+    const target = state.segmentsByLang[targetLang] || []
+    const wanted = [...new Set(indices)]
+      .filter((index) => index >= 0 && index < source.length)
+      .sort((a, b) => a - b)
+    if (!wanted.length) return 0
+
+    const start = Math.max(0, wanted[0] - 4)
+    const end = Math.min(source.length, wanted[wanted.length - 1] + 5)
+    const translated = await translateSegments(
+      source.slice(start, end),
+      sourceLang,
+      targetLang,
+    )
+    const before = snapshotSegments()
+    for (const index of wanted) {
+      const relative = index - start
+      const sourceCue = source[index]
+      const translatedCue =
+        translated[relative] ||
+        translated.find(
+          (cue) => cue.start < sourceCue.end && cue.end > sourceCue.start,
+        )
+      if (!translatedCue) continue
+      target[index] = {
+        ...(target[index] || sourceCue),
+        text: translatedCue.text,
+        words: undefined,
+      }
+    }
+    setSegmentsForLang(targetLang, target)
+    pushHistory(before)
+    renderSegments()
+    updateCaption()
+    markChanged()
+    return wanted.length
+  }
+
+  function selectedCueIndices() {
+    const lang = getState().activeLang
+    return [...selectedCueKeys]
+      .filter((key) => key.startsWith(`${lang}:`))
+      .map((key) => Number(key.slice(lang.length + 1)))
+      .filter(Number.isFinite)
+  }
+
+  function focusCue(lang: string, index: number) {
+    if (getState().activeLang !== lang) setActiveLang(lang)
+    renderTabs()
+    renderSegments()
+    const row = ui.segList.querySelector(
+      `.seg[data-lang="${CSS.escape(lang)}"][data-index="${index}"]`,
+    ) as HTMLElement | null
+    row?.scrollIntoView({ block: "center", behavior: "smooth" })
+    row?.querySelector<HTMLTextAreaElement>(".seg-text")?.focus()
+    const segment = segmentsForLang(lang)[index]
+    if (segment) ui.video.currentTime = segmentSeekTime(segment)
   }
 
   function wireSegmentEditor() {
@@ -272,6 +437,9 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
       if (!seg) return
       if (event.target.classList.contains("seg-text")) {
         seg.text = event.target.value
+        updateCaption()
+      } else if (event.target.classList.contains("speaker-input")) {
+        seg.speaker = event.target.value.trim() || undefined
         updateCaption()
       }
     })
@@ -300,6 +468,7 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
         pushHistory(before)
         renderSegments()
         updateCaption()
+        markChanged()
       }
     })
 
@@ -309,7 +478,14 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
       setActiveLangFromElement(li)
       const { lang, index, segments, seg } = segmentFromElement(li)
       if (!seg) return
-      if (event.target.closest(".seg-play")) {
+      if (event.target.closest(".seg-select")) {
+        const key = cueKey(lang, index)
+        if (event.target.checked) selectedCueKeys.add(key)
+        else selectedCueKeys.delete(key)
+        li.classList.toggle("is-selected", selectedCueKeys.has(key))
+        refreshRetranslateButtons()
+        return
+      } else if (event.target.closest(".seg-play")) {
         ui.video.currentTime = segmentSeekTime(seg)
         ui.video.play().catch(() => {})
       } else if (event.target.closest(".seg-del")) {
@@ -319,8 +495,16 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
         renderSegments()
         enableExports(true)
         updateCaption()
+        selectedCueKeys.clear()
+        markChanged()
         return
-      } else if (!event.target.closest(".seg-text, .t-input")) {
+      } else if (event.target.closest(".seg-split")) {
+        splitCue(lang, index)
+        return
+      } else if (event.target.closest(".seg-merge")) {
+        mergeCue(lang, index)
+        return
+      } else if (!event.target.closest(".seg-text, .t-input, .speaker-input")) {
         ui.video.currentTime = segmentSeekTime(seg)
         updateCaption()
       }
@@ -332,13 +516,17 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
       if (!li) return
       const isEditable =
         event.target.classList.contains("seg-text") ||
-        event.target.classList.contains("t-input")
+        event.target.classList.contains("t-input") ||
+        event.target.classList.contains("speaker-input")
       if (!isEditable) return
       const index = Number(li.dataset.index)
       const { lang, seg } = segmentFromElement(li)
       if (!seg) return
       setActiveLangFromElement(li)
-      if (event.target.classList.contains("seg-text"))
+      if (
+        event.target.classList.contains("seg-text") ||
+        event.target.classList.contains("speaker-input")
+      )
         textEditSnapshot = snapshotSegments()
       const seekTime = segmentSeekTime(seg)
       if (Math.abs(ui.video.currentTime - seekTime) > 0.05)
@@ -347,10 +535,14 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
     })
 
     ui.segList.addEventListener("focusout", (event: any) => {
-      if (!event.target.classList?.contains("seg-text")) return
+      if (
+        !event.target.classList?.contains("seg-text") &&
+        !event.target.classList?.contains("speaker-input")
+      ) return
       if (textEditSnapshot && snapshotSegments() !== textEditSnapshot)
         pushHistory(textEditSnapshot)
       textEditSnapshot = null
+      markChanged()
     })
 
     ui.addSegBtn.addEventListener("click", () => {
@@ -368,6 +560,33 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
         ui.segList,
       )
       created?.focus()
+      markChanged()
+    })
+
+    ui.retranslateSelectedBtn.addEventListener("click", async () => {
+      const indices = selectedCueIndices()
+      if (!indices.length) return
+      ui.retranslateSelectedBtn.disabled = true
+      try {
+        await retranslateIndices(indices)
+        selectedCueKeys.clear()
+      } catch (error) {
+        console.error("[translate] selected cues", error)
+      } finally {
+        refreshRetranslateButtons()
+      }
+    })
+    ui.retranslateIssuesBtn.addEventListener("click", async () => {
+      const indices = issueCueIndices()
+      if (!indices.length) return
+      ui.retranslateIssuesBtn.disabled = true
+      try {
+        await retranslateIndices(indices)
+      } catch (error) {
+        console.error("[translate] issue cues", error)
+      } finally {
+        refreshRetranslateButtons()
+      }
     })
   }
 
@@ -377,6 +596,10 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
     populateAddLang,
     renderSegments,
     renderTabs,
+    focusCue,
+    issueCueIndices,
+    retranslateIndices,
+    selectedCueIndices,
     setLangAddStatus,
     wireSegmentEditor,
   }

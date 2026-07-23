@@ -1,6 +1,5 @@
 ---
 import ChevronLeft from "@/assets/svg/chevron-left.svg"
-import Footer from "@/components/Footer.astro"
 import { useTranslations } from "@/i18n/ui"
 
 const t = useTranslations(Astro.currentLocale)
@@ -38,25 +37,33 @@ const t = useTranslations(Astro.currentLocale)
         </select>
       </label>
 
-      <label id="dual-track-field" class="option-field" hidden>
-        <input id="dual-track" type="checkbox" />
-        <span class="option-copy">
-          <strong>{t.config.dualTrack}</strong>
-          <small>{t.config.dualTrackHint}</small>
-        </span>
+      <label class="field">
+        <span>{t.config.translateProvider}</span>
+        <select id="translate-provider">
+          <option value="custom">{t.config.translateCustom}</option>
+          <option value="gemini">{t.config.translateGemini}</option>
+        </select>
       </label>
 
-      <label class="option-field">
-        <input id="word-animation" type="checkbox" aria-describedby="word-animation-hint" />
-        <span class="option-copy">
-          <strong>{t.config.wordAnimation}</strong>
-          <small id="word-animation-hint">{t.config.wordAnimationHint}</small>
-        </span>
-      </label>
+      <div class="config-api-shortcut">
+        <span>Endpoint, API key và model được quản lý tập trung tại tab Kiểm tra API.</span>
+        <button id="config-open-api-btn" class="btn-ghost" type="button">
+          Mở Kiểm tra API
+        </button>
+      </div>
 
-      <button id="transcribe-btn" class="btn-primary btn-block" type="button">
-        {t.config.generate}
-      </button>
+      <p class="config-disabled-note" role="status">
+        {t.config.groqWhisperHint}
+      </p>
+
+      <div class="generate-actions">
+        <button id="transcribe-btn" class="btn-primary btn-block" type="button">
+          {t.config.groqGenerate}
+        </button>
+        <button id="cancel-generate-btn" class="btn-ghost btn-block" type="button" hidden>
+          {t.config.cancel}
+        </button>
+      </div>
 
       <div id="config-progress" class="gen-progress" hidden>
         <div class="gen-progress-head">
@@ -79,5 +86,4 @@ const t = useTranslations(Astro.currentLocale)
     </div>
   </div>
 
-  <Footer />
 </section>

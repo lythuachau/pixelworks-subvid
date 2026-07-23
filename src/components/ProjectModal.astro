@@ -1,0 +1,31 @@
+---
+import Close from "@/assets/svg/close.svg"
+import { useTranslations } from "@/i18n/ui"
+
+const t = useTranslations(Astro.currentLocale)
+---
+
+<div id="project-modal" class="utility-modal" hidden>
+  <div id="project-backdrop" class="utility-backdrop"></div>
+  <section class="utility-dialog project-dialog" role="dialog" aria-modal="true" aria-labelledby="project-title">
+    <header class="utility-head">
+      <div>
+        <h2 id="project-title">{t.project.title}</h2>
+        <p>{t.project.hint}</p>
+      </div>
+      <button id="project-close" class="utility-close" type="button" aria-label={t.project.close}>
+        <Close />
+      </button>
+    </header>
+    <div class="project-save-row">
+      <label>
+        <span>{t.project.name}</span>
+        <input id="project-name" type="text" maxlength="120" autocomplete="off" />
+      </label>
+      <button id="project-save-current" class="btn-primary" type="button">{t.project.save}</button>
+    </div>
+    <p id="project-status" class="utility-status" role="status" aria-live="polite"></p>
+    <div id="project-list" class="project-list"></div>
+  </section>
+</div>
+

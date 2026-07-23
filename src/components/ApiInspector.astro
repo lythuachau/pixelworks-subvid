@@ -1,0 +1,242 @@
+<section id="api-inspector" class="api-inspector" hidden aria-labelledby="api-inspector-title">
+  <div id="api-admin-gate" class="api-admin-gate">
+    <span class="api-inspector-kicker">ADMIN ACCESS</span>
+    <h1 id="api-admin-title">Đăng nhập quản trị API</h1>
+    <p id="api-admin-description">
+      Tài khoản quản trị được cấu hình riêng ở backend và chỉ dùng để mở tab Kiểm tra API.
+    </p>
+    <form id="api-admin-form" class="api-admin-form" autocomplete="off">
+      <label class="field">
+        <span>Tài khoản quản trị</span>
+        <input id="api-admin-username" type="text" autocomplete="username" required />
+      </label>
+      <label class="field">
+        <span>Mật khẩu</span>
+        <input id="api-admin-password" type="password" autocomplete="current-password" required />
+      </label>
+      <button id="api-admin-login-btn" class="btn-primary btn-block" type="submit">
+        Đăng nhập
+      </button>
+      <p id="api-admin-message" class="api-admin-message" role="status" aria-live="polite"></p>
+    </form>
+  </div>
+
+  <div id="api-admin-content" class="api-inspector-card" hidden>
+    <header class="api-inspector-header">
+      <div>
+        <span class="api-inspector-kicker">API ANALYZER</span>
+        <h1 id="api-inspector-title">Kiểm tra API và model</h1>
+        <p>
+          Kiểm tra API tùy chỉnh hoặc Gemini, tự tải model khả dụng và xác nhận model
+          sẽ dùng để phân tích ngữ cảnh — không cần nhập tên model bằng tay.
+        </p>
+      </div>
+      <div class="api-inspector-header-actions">
+        <span id="api-admin-identity" class="api-admin-identity"></span>
+        <button id="api-admin-logout-btn" class="btn-ghost" type="button">Khóa tab</button>
+        <span id="api-connection-badge" class="api-connection-badge" data-state="idle">
+          Chưa kiểm tra
+        </span>
+      </div>
+    </header>
+
+    <div class="api-provider-tabs" role="tablist" aria-label="Nhà cung cấp API dịch">
+      <button
+        id="api-custom-tab"
+        class="api-provider-tab is-active"
+        type="button"
+        role="tab"
+        aria-selected="true"
+        aria-controls="api-custom-panel"
+      >
+        API tùy chỉnh
+      </button>
+      <button
+        id="api-gemini-tab"
+        class="api-provider-tab"
+        type="button"
+        role="tab"
+        aria-selected="false"
+        aria-controls="api-gemini-panel"
+      >
+        Gemini
+      </button>
+    </div>
+
+    <div id="api-custom-panel" class="api-inspector-grid" role="tabpanel" aria-labelledby="api-custom-tab">
+      <form id="api-inspector-form" class="api-inspector-form" autocomplete="off">
+        <label class="field">
+          <span>Endpoint API</span>
+          <input
+            id="api-inspector-endpoint"
+            type="url"
+            placeholder="https://cc.freemodel.dev"
+            autocomplete="off"
+            spellcheck="false"
+            required
+          />
+        </label>
+
+        <label class="field">
+          <span>API key</span>
+          <div class="api-key-row">
+            <input
+              id="api-inspector-key"
+              type="password"
+              placeholder="Nhập API key"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            />
+            <button id="api-key-visibility" class="btn-ghost" type="button" aria-pressed="false">
+              Hiện
+            </button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>Giao thức</span>
+          <select id="api-inspector-protocol">
+            <option value="auto">Tự động nhận diện</option>
+            <option value="responses">OpenAI Responses (/v1/responses)</option>
+            <option value="openai">OpenAI Chat Completions</option>
+            <option value="anthropic">Anthropic Messages</option>
+          </select>
+        </label>
+
+        <button id="api-discover-btn" class="btn-primary btn-block" type="submit">
+          Kiểm tra và tải model
+        </button>
+
+        <p class="api-security-note">
+          Khóa được lưu trong Cloudflare KV phía backend sau khi model được xác nhận
+          và không được trả lại trình duyệt.
+        </p>
+      </form>
+
+      <div class="api-model-panel">
+        <div class="api-model-toolbar">
+          <div>
+            <strong>Model khả dụng</strong>
+            <small id="api-model-count">Chưa có dữ liệu</small>
+          </div>
+          <input
+            id="api-model-search"
+            type="search"
+            placeholder="Lọc model…"
+            aria-label="Lọc danh sách model"
+            disabled
+          />
+        </div>
+
+        <div id="api-model-list" class="api-model-list" role="radiogroup" aria-label="Model dịch">
+          <div class="api-model-empty">
+            <span>01</span>
+            <p>Nhập endpoint và API key để tự động lấy danh sách model.</p>
+          </div>
+        </div>
+
+        <div class="api-model-actions">
+          <button id="api-find-model-btn" class="btn-ghost" type="button" disabled>
+            Tìm model thực sự dùng được
+          </button>
+          <button id="api-test-model-btn" class="btn-ghost api-test-btn" type="button" disabled>
+            Test API model đã chọn
+          </button>
+          <button id="api-save-model-btn" class="btn-primary" type="button" disabled>
+            Xác nhận dùng model này
+          </button>
+        </div>
+
+        <div id="api-test-output" class="api-test-output" role="status" aria-live="polite">
+          <strong>Kết quả kiểm tra sẽ hiển thị tại đây.</strong>
+          <span>Phép thử dùng một câu tiếng Trung ngắn để đánh giá xác thực, phản hồi và bản dịch.</span>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="api-gemini-panel"
+      class="api-inspector-grid"
+      role="tabpanel"
+      aria-labelledby="api-gemini-tab"
+      hidden
+    >
+      <form id="gemini-inspector-form" class="api-inspector-form" autocomplete="off">
+        <div class="api-fixed-provider">
+          <span>NHÀ CUNG CẤP</span>
+          <strong>Google AI Studio · Gemini API</strong>
+          <small>Endpoint được Subvid cấu hình tự động.</small>
+        </div>
+
+        <label class="field">
+          <span>Gemini API key</span>
+          <div class="api-key-row">
+            <input
+              id="gemini-inspector-key"
+              type="password"
+              placeholder="Nhập Gemini API key"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            />
+            <button id="gemini-key-visibility" class="btn-ghost" type="button" aria-pressed="false">
+              Hiện
+            </button>
+          </div>
+        </label>
+
+        <button id="gemini-discover-btn" class="btn-primary btn-block" type="submit">
+          Kiểm tra Gemini và tải model
+        </button>
+
+        <p class="api-security-note">
+          Khóa được lưu trong Cloudflare KV phía backend sau khi model được xác nhận
+          và không được trả lại trình duyệt.
+        </p>
+      </form>
+
+      <div class="api-model-panel">
+        <div class="api-model-toolbar">
+          <div>
+            <strong>Model Gemini khả dụng</strong>
+            <small id="gemini-model-count">Chưa có dữ liệu</small>
+          </div>
+          <input
+            id="gemini-model-search"
+            type="search"
+            placeholder="Lọc model…"
+            aria-label="Lọc danh sách model Gemini"
+            disabled
+          />
+        </div>
+
+        <div
+          id="gemini-model-list"
+          class="api-model-list"
+          role="radiogroup"
+          aria-label="Model Gemini"
+        >
+          <div class="api-model-empty">
+            <span>G</span>
+            <p>Nhập Gemini API key để kiểm tra và tự động tải model.</p>
+          </div>
+        </div>
+
+        <div class="api-model-actions">
+          <button id="gemini-test-model-btn" class="btn-ghost api-test-btn" type="button" disabled>
+            Test API model đã chọn
+          </button>
+          <button id="gemini-save-model-btn" class="btn-primary" type="button" disabled>
+            Xác nhận dùng Gemini này
+          </button>
+        </div>
+
+        <div id="gemini-test-output" class="api-test-output" role="status" aria-live="polite">
+          <strong>Kết quả kiểm tra Gemini sẽ hiển thị tại đây.</strong>
+          <span>Model chỉ được xác nhận sau khi trả về bản dịch thử thành công.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

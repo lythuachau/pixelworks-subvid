@@ -1,16 +1,18 @@
-import { LANGS } from "@/scripts/languages.ts"
+import { LANGS } from "./languages.ts"
 
 export type SubtitleSegment = {
   start: number
   end: number
   text: string
   words?: SubtitleWord[]
+  speaker?: string
 }
 
 export type SubtitleWord = {
   start: number
   end: number
   text: string
+  speaker?: string
 }
 
 type NormalizeSegmentsOptions = {
@@ -192,7 +194,12 @@ function normalizeWordChunk(chunk: any, index: number): SubtitleWord | null {
   const text = String(chunk?.text || "").trim()
   if (!text) return null
   const { start, end } = normalizedRange(chunk, index)
-  return { start, end, text }
+  return {
+    start,
+    end,
+    text,
+    speaker: String(chunk?.speaker || "").trim() || undefined,
+  }
 }
 
 function isWordLevelChunks(chunks: any[]) {
@@ -238,6 +245,7 @@ function buildWordSegment(words: SubtitleWord[]): SubtitleSegment {
     end: Math.max(start + 0.35, end),
     text: wordsText(words),
     words,
+    speaker: words.find((word) => word.speaker)?.speaker,
   }
 }
 
@@ -273,6 +281,9 @@ function normalizeWordLevelSegments(chunks: any[], aspectRatio = 16 / 9): Subtit
       const nextText = wordsText([...line, word])
       const nextDuration = word.end - line[0].start
       const shouldBreak =
+        (!!word.speaker &&
+          !!previousWord.speaker &&
+          word.speaker !== previousWord.speaker) ||
         silenceBefore > SILENCE_BREAK_SECONDS ||
         line.length >= maxWords ||
         nextText.length > maxChars ||
@@ -360,6 +371,7 @@ export function normalizeSegments(
         start,
         end: Math.max(start + 0.35, end),
         text: (chunk.text || "").trim(),
+        speaker: String(chunk.speaker || "").trim() || undefined,
       }
     })
     .filter((s: SubtitleSegment) => s.text.length > 0)
@@ -380,4 +392,199 @@ export function normalizeLanguageCode(code: string): string {
   if (!code) return ""
   const short = String(code).toLowerCase().slice(0, 2)
   return short in LANGS ? short : ""
+}
+
+const CJK_RE = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/
+
+/** Soft-wrap subtitle text into at most `maxLines` lines of ~`maxChars`. */
+export function wrapSubtitleText(
+  text: string,
+  maxChars = 42,
+  maxLines = 2,
+): string {
+  const cleaned = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!cleaned || cleaned.length <= maxChars) return cleaned
+
+  const isCjk = CJK_RE.test(cleaned)
+  const tokens = isCjk
+    ? Array.from(cleaned)
+    : cleaned.split(/\s+/).filter(Boolean)
+
+  const lines: string[] = []
+  let current = ""
+
+  const joinToken = (line: string, token: string) => {
+    if (!line) return token
+    return isCjk ? `${line}${token}` : `${line} ${token}`
+  }
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    const candidate = joinToken(current, token)
+    if (candidate.length <= maxChars || !current) {
+      current = candidate
+      continue
+    }
+    lines.push(current)
+    current = token
+    if (lines.length >= maxLines - 1) {
+      // Dump the rest into the last line (may exceed maxChars slightly).
+      current = tokens.slice(i).reduce((acc, t) => joinToken(acc, t), "")
+      break
+    }
+  }
+  if (current) lines.push(current)
+  return lines.slice(0, maxLines).join("\n")
+}
+
+type ReflowOptions = {
+  targetLang?: string
+  maxChars?: number
+  maxLines?: number
+}
+
+type OptimizeSegmentsOptions = {
+  /** Never join cues separated by more than this amount of silence. */
+  maxGap?: number
+  /** Upper bound for a merged spoken sentence. */
+  maxDuration?: number
+  /** Upper bound for merged source text before starting a new cue. */
+  maxChars?: number
+}
+
+const SENTENCE_END_RE = /[.!?\u2026\u3002\uff01\uff1f]\s*$/u
+
+/**
+ * Rebuild ASR-sized chunks into readable source cues before translation.
+ *
+ * Whisper word chunks are intentionally conservative, which can leave a
+ * predicate or one-character suffix in a 300 ms cue. Translating those chunks
+ * one-by-one destroys sentence context. This pass joins adjacent chunks only
+ * while their timing is continuous and keeps every hard silence as a boundary.
+ */
+export function optimizeSubtitleSegments(
+  segments: SubtitleSegment[],
+  lang = "",
+  options: OptimizeSegmentsOptions = {},
+): SubtitleSegment[] {
+  if (segments.length < 2) return segments.map((segment) => ({ ...segment }))
+
+  const isCjk = ["zh", "ja", "ko"].includes(lang) ||
+    segments.some((segment) => CJK_RE.test(segment.text))
+  const maxGap = options.maxGap ?? 0.65
+  const maxDuration = options.maxDuration ?? (isCjk ? 6.2 : 5.5)
+  const maxChars = options.maxChars ?? (isCjk ? 32 : 96)
+  const softGap = Math.min(maxGap, 0.22)
+  const shortDuration = 0.95
+  const shortChars = isCjk ? 4 : 16
+  const ordered = segments
+    .map((segment) => ({ ...segment }))
+    .sort((a, b) => a.start - b.start || a.end - b.end)
+  const optimized: SubtitleSegment[] = []
+  let group: SubtitleSegment[] = []
+
+  const groupText = (items: SubtitleSegment[]) =>
+    items.reduce((text, item) => appendWordText(text, item.text.trim()), "").trim()
+
+  const flush = () => {
+    if (!group.length) return
+    if (group.length === 1) {
+      optimized.push({ ...group[0] })
+      group = []
+      return
+    }
+
+    const first = group[0]
+    const last = group[group.length - 1]
+    const allWords = group.every((segment) => Array.isArray(segment.words))
+      ? group.flatMap((segment) => segment.words || [])
+      : undefined
+    const speakers = new Set(group.map((segment) => segment.speaker).filter(Boolean))
+    optimized.push({
+      start: first.start,
+      end: last.end,
+      text: groupText(group),
+      words: allWords?.length ? allWords.map((word) => ({ ...word })) : undefined,
+      speaker: speakers.size === 1 ? first.speaker : undefined,
+    })
+    group = []
+  }
+
+  for (const segment of ordered) {
+    if (!group.length) {
+      group.push(segment)
+      continue
+    }
+
+    const previous = group[group.length - 1]
+    const first = group[0]
+    const gap = Math.max(0, segment.start - previous.end)
+    const candidateText = groupText([...group, segment])
+    const candidateDuration = segment.end - first.start
+    const previousDuration = previous.end - previous.start
+    const segmentDuration = segment.end - segment.start
+    const previousChars = visibleTextLength(previous.text)
+    const segmentChars = visibleTextLength(segment.text)
+    const hasHardBoundary =
+      gap > maxGap ||
+      (!!previous.speaker && !!segment.speaker && previous.speaker !== segment.speaker) ||
+      SENTENCE_END_RE.test(previous.text)
+    const fragmentBoundary =
+      previousDuration < shortDuration ||
+      segmentDuration < shortDuration ||
+      previousChars <= shortChars ||
+      segmentChars <= shortChars
+    const continuousSpeech = gap <= softGap
+    const absorbTinyTail =
+      continuousSpeech &&
+      segmentDuration < 0.75 &&
+      segmentChars <= shortChars &&
+      candidateDuration <= maxDuration + 1.1 &&
+      candidateText.length <= maxChars + shortChars
+    const candidateTooLarge =
+      !absorbTinyTail &&
+      (candidateDuration > maxDuration || candidateText.length > maxChars)
+
+    if (hasHardBoundary || candidateTooLarge || (!continuousSpeech && !fragmentBoundary)) {
+      flush()
+    }
+    group.push(segment)
+  }
+
+  flush()
+  return optimized
+}
+
+function visibleTextLength(text: string) {
+  return Array.from(String(text || "").replace(/\s+/g, "")).length
+}
+
+/**
+ * Keep the source track as the sole timing authority. Translation may wrap text,
+ * but it must never stretch/shift cues or fabricate per-word timestamps.
+ */
+export function reflowTranslatedSegments(
+  source: SubtitleSegment[],
+  translated: SubtitleSegment[],
+  options: ReflowOptions = {},
+): SubtitleSegment[] {
+  const maxChars = options.maxChars ?? 42
+  const maxLines = options.maxLines ?? 2
+
+  return source.map((src, index) => {
+    const dst = translated[index]
+    // Once a destination cue exists, its text is authoritative. Do not fall
+    // back to the raw source: a sanitized empty cue must not reintroduce an
+    // ASR artefact such as a lone `[` into the translated track.
+    const rawText = String(dst ? dst.text : src.text || "").trim()
+    return {
+      start: src.start,
+      end: src.end,
+      text: rawText ? wrapSubtitleText(rawText, maxChars, maxLines) : "",
+      speaker: src.speaker,
+      // No `words`: distributing translated characters over time is synthetic.
+    }
+  })
 }

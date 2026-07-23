@@ -1,10 +1,15 @@
 ---
 import StatusDock from "@/components/StatusDock.astro"
 import DownloadsPanel from "@/components/DownloadsPanel.astro"
+import AppNavigation from "@/components/AppNavigation.astro"
+import ApiInspector from "@/components/ApiInspector.astro"
 import UploadStage from "@/components/UploadStage.astro"
 import ConfigStage from "@/components/ConfigStage.astro"
 import EditorStage from "@/components/EditorStage.astro"
 import ExportModal from "@/components/ExportModal.astro"
+import ProjectModal from "@/components/ProjectModal.astro"
+import QualityModal from "@/components/QualityModal.astro"
+import CompareModal from "@/components/CompareModal.astro"
 import { clientStrings } from "@/i18n/ui"
 import "@/styles/app.css"
 
@@ -15,6 +20,7 @@ const i18n = clientStrings(Astro.currentLocale)
 
 <StatusDock />
 <DownloadsPanel />
+<AppNavigation />
 
 <main class="app" id="app">
   <UploadStage />
@@ -22,7 +28,20 @@ const i18n = clientStrings(Astro.currentLocale)
   <EditorStage />
 </main>
 
+<ApiInspector />
+
 <ExportModal />
+<ProjectModal />
+<QualityModal />
+<CompareModal />
+
+<div
+  id="devtools-guard-toast"
+  class="devtools-guard-toast"
+  role="status"
+  aria-live="polite"
+  hidden
+></div>
 
 <script is:inline set:html={`window.__I18N__=${JSON.stringify(i18n)}`} />
 <script>

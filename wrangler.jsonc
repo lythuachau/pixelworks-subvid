@@ -8,6 +8,21 @@
   "main": "./src/worker.ts",
   "compatibility_date": "2026-06-02",
   "assets": {
-    "run_worker_first": ["/"]
-  }
+    // Locale redirect on `/` + media import APIs must hit the Worker first.
+    "run_worker_first": ["/", "/api/*"]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "API_CONFIG",
+      "id": "987234b7cab54acdb1134724321d18b0"
+    }
+  ],
+  // Optional link-import backend (self-hosted Cobalt). Set via dashboard or:
+  //   wrangler secret put COBALT_API_KEY
+  //   wrangler secret put MEDIA_PROXY_SECRET
+  // Plain vars can also be set under `vars` for non-secret values.
+  // "vars": {
+  //   "COBALT_API_URL": "https://cobalt.example.com",
+  //   "MEDIA_MAX_BYTES": "80000000"
+  // }
 }

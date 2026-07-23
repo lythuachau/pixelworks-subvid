@@ -1,9 +1,8 @@
-export const defaultLang = "en" as const
+export const defaultLang = "vi" as const
 
 // Display names for the language switcher.
 export const languages = {
-  en: "English",
-  es: "Español",
+  vi: "Tiếng Việt",
 } as const
 
 export type Lang = keyof typeof languages

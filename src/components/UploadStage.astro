@@ -1,7 +1,6 @@
 ---
 import DropzoneIcon from "@/assets/svg/dropzone.svg"
 import HeroUnderline from "@/assets/svg/hero-underline.svg"
-import Footer from "@/components/Footer.astro"
 import { useTranslations } from "@/i18n/ui"
 
 const t = useTranslations(Astro.currentLocale)
@@ -84,7 +83,48 @@ const t = useTranslations(Astro.currentLocale)
     </div>
   </div>
 
-  <Footer />
+  <button id="upload-project-open-btn" class="btn-ghost upload-project-open" type="button">
+    {t.editor.openProject}
+  </button>
+
+  <div class="url-import" id="url-import">
+    <div class="url-import-divider" aria-hidden="true">
+      <span class="url-import-divider-line"></span>
+      <span class="url-import-divider-text">{t.hero.urlDivider}</span>
+      <span class="url-import-divider-line"></span>
+    </div>
+
+    <form id="url-import-form" class="url-import-form" autocomplete="off">
+      <label class="sr-only" for="url-input">{t.hero.urlAria}</label>
+      <div class="url-import-row">
+        <input
+          id="url-input"
+          class="url-import-input"
+          type="text"
+          name="url"
+          inputmode="url"
+          enterkeyhint="go"
+          placeholder={t.hero.urlPlaceholder}
+          aria-describedby="url-hint url-status"
+          spellcheck="false"
+          autocapitalize="off"
+          autocomplete="off"
+        />
+        <button id="url-submit" class="btn-primary url-import-submit" type="submit">
+          {t.hero.urlSubmit}
+        </button>
+      </div>
+      <p id="url-hint" class="url-import-hint">{t.hero.urlHint}</p>
+      <div class="url-import-progress" id="url-progress" hidden>
+        <div class="url-import-progress-track">
+          <div class="url-import-progress-fill" id="url-progress-fill"></div>
+        </div>
+        <span class="url-import-progress-pct" id="url-progress-pct">0%</span>
+      </div>
+      <p id="url-status" class="url-import-status" role="status" aria-live="polite"></p>
+    </form>
+  </div>
+
 </section>
 
 <script>

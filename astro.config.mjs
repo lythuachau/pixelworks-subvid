@@ -5,19 +5,33 @@ import { defineConfig } from 'astro/config';
 import tailwindcss from '@tailwindcss/vite';
 import cloudflare from '@astrojs/cloudflare';
 import sitemap from '@astrojs/sitemap';
+import { localMediaApiPlugin } from './scripts/localMediaApiPlugin.mjs';
+
+// Local Windows hosts currently crash Cloudflare's workerd runner used by
+// @astrojs/cloudflare + @cloudflare/vite-plugin ("internal error; reference = …").
+// Use LOCAL_STATIC=1 for local install/open; production still targets Cloudflare.
+const localStatic = process.env.LOCAL_STATIC === '1';
 
 // https://astro.build/config
 export default defineConfig({
   // Production URL — required for absolute canonical/hreflang/OG URLs and the
   // sitemap. Update this if the site is served from a different domain.
   site: 'https://subvid.app',
-  output: 'server',
+  output: localStatic ? 'static' : 'server',
   // The Cloudflare adapter targets the Workers runtime for edge middleware,
   // while the public pages are emitted as prerendered static assets.
-  adapter: cloudflare(),
+  adapter: localStatic
+    ? undefined
+    : cloudflare({
+        // Ensure custom production bindings (API_CONFIG, assets routing, etc.)
+        // are copied into Astro's generated dist/server/wrangler.json.
+        configPath: './wrangler.jsonc',
+        prerenderEnvironment: 'node',
+        imageService: 'compile',
+      }),
   i18n: {
-    locales: ['en', 'es'],
-    defaultLocale: 'en',
+    locales: ['vi'],
+    defaultLocale: 'vi',
     routing: {
       prefixDefaultLocale: false
     }
@@ -25,13 +39,42 @@ export default defineConfig({
   integrations: [
     sitemap({
       i18n: {
-        defaultLocale: 'en',
-        locales: { en: 'en', es: 'es' }
+        defaultLocale: 'vi',
+        locales: { vi: 'vi' }
       }
     })
   ],
   vite: {
-    plugins: [tailwindcss()],
+    // Always mount local media API in Vite dev so link import works without
+    // the Cloudflare Worker (LOCAL_STATIC and plain `astro dev`).
+    plugins: [tailwindcss(), localMediaApiPlugin()],
+    // FFmpeg WASM needs SharedArrayBuffer → cross-origin isolation.
+    // `credentialless` allows Hugging Face / unpkg model+core fetches without
+    // requiring CORP on every third-party response.
+    server: {
+      // Allow reverse-proxy hosts (Caddy / VPS) so Vite does not block
+      // requests with Host: subvid.choulee.indevs.in
+      allowedHosts: [
+        'subvid.choulee.indevs.in',
+        '.choulee.indevs.in',
+        'localhost',
+      ],
+      headers: {
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'credentialless',
+      },
+    },
+    preview: {
+      allowedHosts: [
+        'subvid.choulee.indevs.in',
+        '.choulee.indevs.in',
+        'localhost',
+      ],
+      headers: {
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'credentialless',
+      },
+    },
     optimizeDeps: {
       exclude: ['mediabunny']
     },

@@ -23,9 +23,17 @@ const t = useTranslations(Astro.currentLocale)
     <li class="seg-empty">{t.sidebar.segEmpty}</li>
   </ul>
   <div class="sidebar-foot">
-    <button id="add-seg-btn" class="btn-ghost" type="button" disabled>
-      {t.sidebar.addLine}
-    </button>
+    <div class="sidebar-tools">
+      <button id="add-seg-btn" class="btn-ghost" type="button" disabled>
+        {t.sidebar.addLine}
+      </button>
+      <button id="retranslate-selected-btn" class="btn-ghost" type="button" disabled>
+        {t.sidebar.retranslateSelected}
+      </button>
+      <button id="retranslate-issues-btn" class="btn-ghost" type="button" disabled>
+        {t.sidebar.retranslateIssues}
+      </button>
+    </div>
     <span id="seg-count" class="seg-count"></span>
   </div>
 </aside>

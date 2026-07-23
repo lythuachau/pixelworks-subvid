@@ -19,32 +19,33 @@ No uploads. No backend. No API keys.
 
 [![Astro](https://img.shields.io/badge/Astro-6-FF5D01?logo=astro&logoColor=white)](https://astro.build)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-38BDF8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
-[![Whisper](https://img.shields.io/badge/AI-Whisper-412991?logo=openai&logoColor=white)](https://huggingface.co/Xenova/whisper-base)
 [![Cloudflare Workers](https://img.shields.io/badge/Deploy-Cloudflare_Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
 
 </div>
 
 ## What it does
 
-1. **Upload a video or audio** — drag & drop or browse. Supports MP4, MOV, WebM, MKV, MP3, WAV, and OGG.
+1. **Upload a video or audio** — drag & drop, browse, or paste a **Douyin / TikTok / YouTube** link (link import needs Worker + Cobalt; see below). Supports MP4, MOV, WebM, MKV, MP3, WAV, and OGG.
 2. **Configure languages** — pick the audio language (or auto-detect) and the subtitle language.
-3. **Generate subtitles** — Whisper transcribes the audio; NLLB translates when needed.
+3. **Open subtitle tracks** — ASR/Whisper is not bundled; use an existing subtitle project/track, then translate when needed.
 4. **Edit in the timeline** — fix text, timing, and styling with undo/redo.
 5. **Export** — download an `.srt` file or a new video with burned-in captions (video files only).
 
-Everything runs client-side. Your files never leave your device.
+Video and audio processing stay on the local machine. Translation sends subtitle text only to the configured API.
 
 ## Features
 
-- **AI transcription** — [Whisper](https://huggingface.co/Xenova/whisper-base) via [transformers.js](https://huggingface.co/docs/transformers.js), with optional WebGPU acceleration.
-- **AI translation** — [NLLB-200](https://huggingface.co/Xenova/nllb-200-distilled-600M) for multilingual subtitle tracks.
+- **Subtitle-first processing** — no ASR/Whisper model is bundled, downloaded, or initialized.
+- **Chinese subtitle OCR** — remains available as a standalone text source for imported subtitle workflows.
+- **Source-locked translation timing** — translated cues copy the source track's exact start/end values and never create character-length or synthetic word timestamps.
+- **Project workflow** — autosave plus named save/open projects, including media, subtitle tracks, styles, and editor settings.
+- **Subtitle QA and cue tools** — overlap/timing/readability checks, cue split/merge, contextual retry, and side-by-side source/target comparison.
 - **Subtitle editor** — segment list, timeline scrubbing, multi-language tracks, caption presets (font, color, background, outline, position).
 - **Export options**
-  - `.srt` subtitle file
+  - SRT, WebVTT, ASS, or TXT subtitle files; all language tracks can be downloaded as one ZIP
   - MP4 with hard-coded subtitles (WebCodecs + [mediabunny](https://github.com/Vanilagy/mediabunny) when available; canvas + MediaRecorder as fallback)
 - **Internationalization** — English (default) and Spanish, with static pages per locale.
-- **Offline-friendly models** — AI weights are downloaded once and cached in the browser (IndexedDB).
-- **Audio-only mode** — upload MP3, WAV, or OGG files to generate subtitle files without needing video.
+- **API-only translation** — Gemini or a custom OpenAI/Anthropic-compatible endpoint; no translation model is loaded in the browser.
 
 ## Tech stack
 
@@ -52,8 +53,7 @@ Everything runs client-side. Your files never leave your device.
 | --- | --- |
 | Framework | [Astro 6](https://astro.build) (static site) |
 | Styling | [Tailwind CSS 4](https://tailwindcss.com) |
-| Speech recognition | [@xenova/transformers](https://www.npmjs.com/package/@xenova/transformers) (Whisper) |
-| Translation | transformers.js (NLLB-200) |
+| Translation | Gemini API or custom OpenAI/Anthropic-compatible API |
 | Audio extraction | [@ffmpeg/ffmpeg](https://ffmpegwasm.netlify.app) (WASM) |
 | Video export | [mediabunny](https://www.npmjs.com/package/mediabunny) + WebCodecs |
 | Deployment | [Cloudflare Workers](https://workers.cloudflare.com) (static assets) |
@@ -79,7 +79,7 @@ pnpm install
 pnpm dev
 ```
 
-No environment variables or external services are required for local development.
+File upload works with **no environment variables**. Optional **link import** (Douyin / TikTok / YouTube) needs a deployed Worker plus a self-hosted [Cobalt](https://github.com/imputnet/cobalt) instance — see [Link import](#link-import-douyin--tiktok--youtube).
 
 ## Scripts
 
@@ -100,8 +100,7 @@ src/
 ├── layouts/          # HTML shell, hreflang, meta tags
 ├── pages/            # Routes: / (en), /es/ (es)
 ├── scripts/
-│   ├── app.ts        # Main client logic (state, transcription, export)
-│   ├── transcriber.worker.ts  # Web Worker for AI models
+│   ├── app.ts        # Main client logic (state, translation, export)
 │   └── dom.ts        # DOM helpers
 └── styles/           # Global and app-specific CSS
 ```
@@ -111,15 +110,13 @@ The app is a multi-stage SPA embedded in static Astro pages. Server-rendered cop
 ## Architecture notes
 
 - **Main thread** — UI, video playback, timeline, FFmpeg orchestration, export rendering.
-- **Transcriber worker** — loads Whisper/NLLB and runs inference off the main thread so the UI stays responsive.
-- **FFmpeg worker** — extracts audio from the uploaded video before transcription.
-- **Model downloads** — fetched from Hugging Face on first use (~150 MB for Whisper base + translation model). Progress is shown in the status dock; models can be cleared from the downloads panel.
+- **FFmpeg worker** — remains available for media preview and export/remux.
+- **Model downloads** — no ASR model assets are downloaded; translation uses the configured API.
 
 ### Browser capabilities
 
 | Capability | Used for |
 | --- | --- |
-| WebGPU | Faster Whisper inference (when supported) |
 | WebCodecs | Fast MP4 export with burned-in subtitles |
 | SharedArrayBuffer / cross-origin isolation | Required by FFmpeg WASM in some environments |
 
@@ -133,6 +130,56 @@ pnpm deploy
 
 You need a [Cloudflare account](https://dash.cloudflare.com) and Wrangler authenticated (`wrangler login`).
 
+## Link import (Douyin · TikTok · YouTube)
+
+The upload stage accepts a pasteable share link in addition to local files. Flow:
+
+1. Browser `POST /api/media/resolve` with the URL (Worker validates host allowlist).
+2. Worker calls your **self-hosted Cobalt** instance and returns a short-lived same-origin proxy path.
+3. Browser downloads via `GET /api/media/proxy`, builds a `File`, then reuses the normal subtitle pipeline.
+
+### Configure
+
+Copy `env.example` and set secrets/vars on the Worker (dashboard or Wrangler):
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `COBALT_API_URL` | yes (for links) | Base URL of your Cobalt API (no trailing slash) |
+| `COBALT_API_KEY` | no | `Authorization: Api-Key …` if the instance requires it |
+| `MEDIA_PROXY_SECRET` | recommended | HMAC secret for proxy download tokens |
+| `MEDIA_MAX_BYTES` | no | Max import size (default `160000000` ≈ 160 MB) |
+
+```sh
+# example (non-secret)
+npx wrangler secret put COBALT_API_KEY
+npx wrangler secret put MEDIA_PROXY_SECRET
+```
+
+Also set `COBALT_API_URL` as a Worker var (or uncomment `vars` in `wrangler.jsonc`).
+
+**Important:** do not point production traffic at the public `api.cobalt.tools` instance — it uses bot protection and is not for third-party apps. [Run your own Cobalt instance](https://github.com/imputnet/cobalt/blob/main/docs/run-an-instance.md).
+
+### Supported hosts
+
+- **Douyin** — `douyin.com`, `v.douyin.com`, `iesdouyin.com`
+- **TikTok** — `tiktok.com`, `vm.tiktok.com`, `vt.tiktok.com`, …
+- **YouTube** — `youtube.com`, `youtu.be`, `music.youtube.com`
+
+Photo-only carousels / multi-item pickers without a video track are rejected with a clear UI error. Prefer short clips; imports default to **720p** for size limits on Workers.
+
+### Local development
+
+`pnpm dev` / `pnpm dev:local` mounts `/api/media/*` via a Vite middleware (no Worker required):
+
+1. **If `COBALT_API_URL` is set** in `.env` → same Cobalt resolve path as production.
+2. **Otherwise** → local **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** fallback (must be on `PATH`). Supports Douyin / TikTok / YouTube for local testing without Cobalt.
+
+```sh
+# optional — production-like local path
+cp env.example .env
+# COBALT_API_URL=https://your-cobalt-instance.example
+```
+
 ## Adding a language
 
 1. Add the locale code to `i18n.locales` in `astro.config.mjs`.
@@ -144,8 +191,9 @@ You need a [Cloudflare account](https://dash.cloudflare.com) and Wrangler authen
 
 subvid.app is designed around local-first processing:
 
-- Videos are read from disk via the File API — never uploaded.
+- Local files are read via the File API and transcribed in the browser.
 - AI models run in Web Workers with WASM/WebGPU.
+- Optional **link import** resolves Douyin / TikTok / YouTube media through your Worker + Cobalt instance (only the share URL and media bytes for that import leave the browser).
 - No analytics backend or user accounts in this codebase.
 
 ## License

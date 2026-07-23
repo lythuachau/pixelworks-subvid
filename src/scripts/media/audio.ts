@@ -26,13 +26,29 @@ export function createAudioService(options: AudioServiceOptions) {
   let ffmpeg: any = null
   let ffmpegLoading: Promise<any> | null = null
 
-  async function ensureFfmpeg() {
+  async function disposeFfmpeg() {
+    const instance = ffmpeg
+    ffmpeg = null
+    ffmpegLoading = null
+    if (!instance) return
+    try {
+      await instance.terminate?.()
+    } catch (error) {
+      console.warn("[ffmpeg] terminate failed", error)
+    }
+  }
+
+  async function ensureFfmpeg({ forceReload = false } = {}) {
+    if (forceReload) await disposeFfmpeg()
     if (ffmpeg) return ffmpeg
     if (ffmpegLoading) return ffmpegLoading
     ffmpegLoading = loadFfmpeg()
     try {
       ffmpeg = await ffmpegLoading
       return ffmpeg
+    } catch (error) {
+      ffmpeg = null
+      throw error
     } finally {
       ffmpegLoading = null
     }
@@ -130,40 +146,77 @@ export function createAudioService(options: AudioServiceOptions) {
     return out
   }
 
-  async function extractAudioBuffer(file: File) {
+  async function extractWithWorker(worker: any, file: File) {
     const inputName = "input-video"
     const outputName = "audio.wav"
+    try {
+      options.setStatus(options.tt("steps.readingVideo"), "busy")
+      await worker.writeFile(inputName, await fetchFile(file))
+      options.setStatus(options.tt("steps.extractingAudio"), "busy")
+      // Prefer stream copy of the audio track when possible, then fall back to
+      // a full re-encode. Large Douyin MP4s can OOM FFmpeg WASM if re-encoded
+      // without -map / with huge intermediate buffers.
+      try {
+        await worker.exec([
+          "-i",
+          inputName,
+          "-map",
+          "0:a:0",
+          "-vn",
+          "-ac",
+          "1",
+          "-ar",
+          "16000",
+          "-f",
+          "wav",
+          "-y",
+          outputName,
+        ])
+      } catch (firstError) {
+        console.warn("[ffmpeg] primary extract failed, retrying simpler flags", firstError)
+        await worker.deleteFile(outputName).catch(() => {})
+        await worker.exec([
+          "-i",
+          inputName,
+          "-vn",
+          "-ac",
+          "1",
+          "-ar",
+          "16000",
+          "-f",
+          "wav",
+          "-y",
+          outputName,
+        ])
+      }
 
-    options.setIndeterminate(true)
-    options.setStatus(options.tt("steps.loadingFfmpeg"), "busy")
-    const worker = await ensureFfmpeg()
-    options.setStatus(options.tt("steps.readingVideo"), "busy")
-    await worker.writeFile(inputName, await fetchFile(file))
-    options.setStatus(options.tt("steps.extractingAudio"), "busy")
-    await worker.exec([
-      "-i",
-      inputName,
-      "-vn",
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-f",
-      "wav",
-      outputName,
-    ])
-
-    options.setStatus(options.tt("steps.readingAudio"), "busy")
-    options.setProgress(32)
-    const outputData = await worker.readFile(outputName)
-    await worker.deleteFile(inputName)
-    await worker.deleteFile(outputName)
-    options.applyProgress(34)
-
-    const bytes =
-      outputData instanceof Uint8Array
+      options.setStatus(options.tt("steps.readingAudio"), "busy")
+      options.setProgress(32)
+      const outputData = await worker.readFile(outputName)
+      options.applyProgress(34)
+      return outputData instanceof Uint8Array
         ? outputData
         : new Uint8Array(outputData as ArrayBuffer)
+    } finally {
+      await worker.deleteFile(inputName).catch(() => {})
+      await worker.deleteFile(outputName).catch(() => {})
+    }
+  }
+
+  async function extractAudioBuffer(file: File) {
+    options.setIndeterminate(true)
+    options.setStatus(options.tt("steps.loadingFfmpeg"), "busy")
+
+    let bytes: Uint8Array
+    try {
+      const worker = await ensureFfmpeg()
+      bytes = await extractWithWorker(worker, file)
+    } catch (error) {
+      // WASM abort / worker crash leaves a poisoned instance — rebuild once.
+      console.warn("[ffmpeg] extract failed, reloading FFmpeg WASM", error)
+      const worker = await ensureFfmpeg({ forceReload: true })
+      bytes = await extractWithWorker(worker, file)
+    }
 
     options.setStatus(options.tt("steps.decodingAudio"), "busy")
     let copied = await decodeWavPcm16(bytes, (ratio) => {

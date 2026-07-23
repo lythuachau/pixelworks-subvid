@@ -2,7 +2,6 @@ type DownloadsControllerOptions = {
   ui: any
   tt: (path: string, vars?: Record<string, unknown>) => string
   prettifyBytes: (bytes: number) => string
-  hasBuiltInTranslationSupport: () => boolean
 }
 
 const RING_C = 2 * Math.PI * 15.5
@@ -11,19 +10,10 @@ export function createDownloadsController({
   ui,
   tt,
   prettifyBytes,
-  hasBuiltInTranslationSupport,
 }: DownloadsControllerOptions) {
   const downloads: any = {
     ffmpeg: {
       label: tt("downloads.ffmpeg"),
-      state: "pending",
-      progress: 0,
-      loaded: 0,
-      total: 0,
-      speed: 0,
-    },
-    asr: {
-      label: tt("downloads.whisper"),
       state: "pending",
       progress: 0,
       loaded: 0,
@@ -37,9 +27,7 @@ export function createDownloadsController({
       loaded: 0,
       total: 0,
       speed: 0,
-      pendingNote: hasBuiltInTranslationSupport()
-        ? tt("downloads.pendingNoteChrome")
-        : tt("downloads.pendingNote"),
+      pendingNote: tt("downloads.pendingNote"),
       readyNote: "",
     },
   }
@@ -47,9 +35,6 @@ export function createDownloadsController({
   const STATE_LABEL = {
     error: tt("downloads.downloadFailed"),
   }
-
-  let clearConfirmTimer = 0
-  let cachedModelsBytes = 0
 
   function trackSpeed(item: any, loaded: number) {
     const now = performance.now()
@@ -69,6 +54,7 @@ export function createDownloadsController({
 
   function updateDownloadStatus(key: string, state: string) {
     const item = downloads[key]
+    if (!item) return
     item.state = state
     if (state === "ready") {
       item.progress = 100
@@ -78,40 +64,6 @@ export function createDownloadsController({
       item.speed = 0
     }
     renderDownloads()
-  }
-
-  function makeTransformersTracker(key: string) {
-    const files = new Map()
-    return (e: any) => {
-      const item = downloads[key]
-      if (
-        e?.status === "progress" ||
-        e?.status === "download" ||
-        e?.status === "initiate"
-      ) {
-        if (
-          typeof e.loaded === "number" &&
-          typeof e.total === "number" &&
-          e.total > 0
-        ) {
-          files.set(e.file, { loaded: e.loaded, total: e.total })
-        }
-        let loaded = 0
-        let total = 0
-        files.forEach((f: any) => {
-          loaded += f.loaded
-          total += f.total
-        })
-        item.loaded = loaded
-        item.total = total
-        item.progress = total
-          ? Math.min(100, (loaded / total) * 100)
-          : item.progress
-        item.state = "downloading"
-        trackSpeed(item, loaded)
-        renderDownloads()
-      }
-    }
   }
 
   async function fetchWithProgress(
@@ -262,104 +214,10 @@ export function createDownloadsController({
         : "busy"
   }
 
-  function clearModelsLabel() {
-    return cachedModelsBytes > 0
-      ? tt("downloads.clearWithSize", { size: prettifyBytes(cachedModelsBytes) })
-      : tt("downloads.clearNone")
-  }
-
-  async function getCachedModelsSize() {
-    if (typeof caches === "undefined") return 0
-    let total = 0
-    try {
-      const keys = await caches.keys()
-      const targets = keys.filter((k) => /transformers/i.test(k))
-      for (const key of targets) {
-        const cache = await caches.open(key)
-        const requests = await cache.keys()
-        for (const req of requests) {
-          const res = await cache.match(req)
-          if (!res) continue
-          const len = Number(res.headers.get("content-length"))
-          total += len || (await res.clone().blob()).size
-        }
-      }
-    } catch (e) {
-      console.warn("[clear-models] size calc failed", e)
-    }
-    return total
-  }
-
-  async function refreshClearModelsUI() {
-    const btn = ui.clearModelsBtn
-    if (!btn || btn.dataset.confirm === "1" || btn.dataset.busy === "1") return
-    cachedModelsBytes = await getCachedModelsSize()
-    btn.textContent = clearModelsLabel()
-    btn.disabled = cachedModelsBytes === 0
-  }
-
-  async function clearLocalModels() {
-    const btn = ui.clearModelsBtn
-    if (!btn || !cachedModelsBytes) return
-
-    if (btn.dataset.confirm !== "1") {
-      btn.dataset.confirm = "1"
-      btn.classList.add("is-confirm")
-      btn.textContent = tt("downloads.clearConfirm", {
-        size: prettifyBytes(cachedModelsBytes),
-      })
-      clearTimeout(clearConfirmTimer)
-      clearConfirmTimer = window.setTimeout(() => {
-        btn.dataset.confirm = ""
-        btn.classList.remove("is-confirm")
-        btn.textContent = clearModelsLabel()
-      }, 3500)
-      return
-    }
-
-    clearTimeout(clearConfirmTimer)
-    btn.dataset.confirm = ""
-    btn.dataset.busy = "1"
-    btn.classList.remove("is-confirm")
-    btn.disabled = true
-    btn.textContent = tt("downloads.deleting")
-
-    const freed = cachedModelsBytes
-    let deleted = false
-    try {
-      if (typeof caches !== "undefined") {
-        const keys = await caches.keys()
-        const targets = keys.filter((k) => /transformers/i.test(k))
-        await Promise.all(
-          (targets.length ? targets : ["transformers-cache"]).map((k) =>
-            caches.delete(k),
-          ),
-        )
-        deleted = true
-      }
-    } catch (e) {
-      console.warn("[clear-models] failed to delete cache", e)
-    }
-
-    btn.dataset.busy = ""
-    cachedModelsBytes = 0
-    btn.textContent = clearModelsLabel()
-    btn.disabled = true
-    if (ui.clearModelsNote) {
-      ui.clearModelsNote.hidden = false
-      ui.clearModelsNote.textContent = deleted
-        ? tt("downloads.freed", { size: prettifyBytes(freed) })
-        : tt("downloads.clearFailed")
-    }
-  }
-
   return {
     downloads,
     renderDownloads,
     updateDownloadStatus,
-    makeTransformersTracker,
     fetchWithProgress,
-    refreshClearModelsUI,
-    clearLocalModels,
   }
 }

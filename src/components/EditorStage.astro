@@ -42,9 +42,34 @@ const t = useTranslations(Astro.currentLocale)
     <div id="video-meta" class="video-meta"></div>
     <span id="generation-time" class="generation-time" hidden></span>
     <div class="editor-actions">
+      <button id="project-open-btn" class="btn-soft" type="button">
+        {t.editor.openProject}
+      </button>
+      <button id="project-save-btn" class="btn-soft" type="button">
+        {t.editor.saveProject}
+      </button>
+      <button id="quality-check-btn" class="btn-soft" type="button" disabled>
+        {t.editor.qualityCheck}<span id="quality-issue-count" class="tool-count" hidden></span>
+      </button>
+      <button id="compare-open-btn" class="btn-soft" type="button" disabled>
+        {t.editor.compareTranslation}
+      </button>
+      <label class="export-field subtitle-export-field" for="subtitle-format">
+        <span>{t.editor.subtitleFormat}</span>
+        <select id="subtitle-format" name="subtitle-format">
+          <option value="srt">SRT</option>
+          <option value="vtt">VTT</option>
+          <option value="ass">ASS</option>
+          <option value="txt">TXT</option>
+        </select>
+      </label>
       <button id="download-srt-btn" class="btn-soft" type="button" disabled>
         <Download />
-        {t.editor.downloadSrt}
+        {t.editor.downloadSubtitles}
+      </button>
+      <button id="download-all-tracks-btn" class="btn-soft" type="button" disabled>
+        <Download />
+        {t.editor.downloadAllTracks}
       </button>
       <div class="export-options" aria-label={t.editor.videoExportOptions}>
         <label class="export-field" for="export-format">

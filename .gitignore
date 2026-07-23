@@ -15,6 +15,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+*.log
+.codex-*
+.service.*
 
 # environment variables
 .env
@@ -31,3 +34,11 @@ pnpm-debug.log*
 # AI Agents & VibeCoding artifacts
 .agents/
 .claude/
+
+# local runtime/test data
+tmp-agent-test/
+thay doi matkhau tren kiemtra API.txt
+
+# Python helper caches
+__pycache__/
+*.py[cod]

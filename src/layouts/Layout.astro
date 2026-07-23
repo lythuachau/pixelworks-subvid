@@ -39,15 +39,6 @@ const structuredData = {
     price: "0",
     priceCurrency: "USD",
   },
-  author: {
-    "@type": "Person",
-    name: "midudev",
-    url: "https://midu.dev",
-  },
-  sameAs: [
-    "https://github.com/midudev/subvid.app",
-    "https://midu.dev",
-  ],
 }
 ---
 
@@ -62,7 +53,6 @@ const structuredData = {
     <meta name="robots" content={noindex ? "noindex, nofollow" : "index, follow, max-image-preview:large"} />
     <meta name="description" content={description} />
     <meta name="keywords" content={t.meta.keywords} />
-    <meta name="author" content="midudev" />
     <link rel="canonical" href={canonicalUrl} />
     {
       Object.keys(languages).map((code) => (

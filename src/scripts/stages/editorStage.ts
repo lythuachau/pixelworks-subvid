@@ -1,6 +1,10 @@
 import { baseFileName } from "@/scripts/file.ts"
 import type { Stage } from "@/scripts/stageManager.ts"
-import { buildSrt } from "@/scripts/subtitles.ts"
+import {
+  buildSubtitleFile,
+  createStoredZip,
+  type SubtitleFormat,
+} from "@/scripts/subtitleFormats.ts"
 import type { ui as appUi } from "@/scripts/ui.ts"
 
 type Segment = { start: number; end: number; text: string }
@@ -8,6 +12,7 @@ type Segment = { start: number; end: number; text: string }
 type EditorStageOptions = {
   ui: typeof appUi
   currentSegments: () => Segment[]
+  allSegmentsByLang: () => Record<string, Segment[]>
   activeLang: () => string
   selectedVideoFile: () => File | null
   isExporting: () => boolean
@@ -28,6 +33,7 @@ function isTextInputTarget(target: EventTarget | null) {
 export function createEditorStageController({
   ui,
   currentSegments,
+  allSegmentsByLang,
   activeLang,
   selectedVideoFile,
   isExporting,
@@ -38,7 +44,15 @@ export function createEditorStageController({
   function enableExports(on: boolean) {
     const ready = on && currentSegments().length > 0
     ui.downloadSrtBtn.disabled = !ready
-    ui.downloadVideoBtn.disabled = !ready
+    ui.downloadAllTracksBtn.disabled = !(
+      on && Object.values(allSegmentsByLang()).some((segments) => segments.length)
+    )
+    ui.qualityCheckBtn.disabled = !ready
+    ui.compareOpenBtn.disabled = !(
+      on && Object.values(allSegmentsByLang()).filter((segments) => segments.length).length > 1
+    )
+    ui.subtitleFormat.disabled = !ready
+    ui.downloadVideoBtn.disabled = !ready || !selectedVideoFile()
     ui.exportFormat.disabled = !ready
     ui.exportQuality.disabled = !ready
   }
@@ -49,19 +63,48 @@ export function createEditorStageController({
     setStage("config")
   }
 
+  function saveBlob(blob: Blob, name: string) {
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = name
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+
+  function selectedSubtitleFormat(): SubtitleFormat {
+    const value = ui.subtitleFormat?.value
+    return value === "vtt" || value === "ass" || value === "txt" ? value : "srt"
+  }
+
   function downloadSrt() {
     const segments = currentSegments()
     if (!segments.length) return
 
-    const blob = new Blob([buildSrt(segments)], {
+    const format = selectedSubtitleFormat()
+    const blob = new Blob(
+      [buildSubtitleFile(segments, format, baseFileName(selectedVideoFile()))],
+      {
       type: "text/plain;charset=utf-8",
-    })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement("a")
-    link.href = url
-    link.download = `${baseFileName(selectedVideoFile())}.${activeLang()}.srt`
-    link.click()
-    URL.revokeObjectURL(url)
+      },
+    )
+    saveBlob(
+      blob,
+      `${baseFileName(selectedVideoFile())}.${activeLang()}.${format}`,
+    )
+  }
+
+  function downloadAllTracks() {
+    const format = selectedSubtitleFormat()
+    const stem = baseFileName(selectedVideoFile())
+    const files = Object.entries(allSegmentsByLang())
+      .filter(([, segments]) => segments.length)
+      .map(([lang, segments]) => ({
+        name: `${stem}.${lang}.${format}`,
+        content: buildSubtitleFile(segments, format, stem),
+      }))
+    if (!files.length) return
+    saveBlob(createStoredZip(files), `${stem}.subtitles.zip`)
   }
 
   function handleKeyboardShortcut(event: KeyboardEvent) {
@@ -107,6 +150,7 @@ export function createEditorStageController({
     ui.undoBtn?.addEventListener("click", undo)
     ui.redoBtn?.addEventListener("click", redo)
     ui.downloadSrtBtn.addEventListener("click", downloadSrt)
+    ui.downloadAllTracksBtn.addEventListener("click", downloadAllTracks)
     document.addEventListener("keydown", handleKeyboardShortcut)
   }
 
@@ -114,6 +158,7 @@ export function createEditorStageController({
     enableExports,
     backToConfig,
     downloadSrt,
+    downloadAllTracks,
     wireEditorStage,
   }
 }

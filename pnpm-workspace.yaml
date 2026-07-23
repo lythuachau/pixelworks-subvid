@@ -6,4 +6,6 @@ allowBuilds:
   onnxruntime-node: true
   protobufjs: true
   sharp: true
+  # Its postinstall only prints OpenCollective information; runtime files ship prebuilt.
+  tesseract.js: false
   workerd: true

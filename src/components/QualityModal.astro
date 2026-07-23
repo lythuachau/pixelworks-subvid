@@ -1,0 +1,24 @@
+---
+import Close from "@/assets/svg/close.svg"
+import { useTranslations } from "@/i18n/ui"
+
+const t = useTranslations(Astro.currentLocale)
+---
+
+<div id="quality-modal" class="utility-modal" hidden>
+  <div id="quality-backdrop" class="utility-backdrop"></div>
+  <section class="utility-dialog quality-dialog" role="dialog" aria-modal="true" aria-labelledby="quality-title">
+    <header class="utility-head">
+      <div>
+        <h2 id="quality-title">{t.quality.title}</h2>
+        <p>{t.quality.hint}</p>
+      </div>
+      <button id="quality-close" class="utility-close" type="button" aria-label={t.quality.close}>
+        <Close />
+      </button>
+    </header>
+    <p id="quality-summary" class="quality-summary"></p>
+    <div id="quality-list" class="quality-list"></div>
+  </section>
+</div>
+

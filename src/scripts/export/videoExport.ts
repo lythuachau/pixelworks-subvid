@@ -80,6 +80,13 @@ export function createVideoExporter(options: VideoExportOptions) {
     modal,
     remuxAudioToAacLc,
   } = options
+  let exportAbortController: AbortController | null = null
+  let activeConversion: any = null
+  let activeRecorder: MediaRecorder | null = null
+
+  function throwIfCanceled() {
+    exportAbortController?.signal.throwIfAborted()
+  }
 
   function errorMessage(error: unknown) {
     return error instanceof Error ? error.message : String(error || "unknown error")
@@ -201,6 +208,7 @@ export function createVideoExporter(options: VideoExportOptions) {
     if (!segments.length || isExporting()) return
 
     const settings = exportSettings()
+    exportAbortController = new AbortController()
     setExporting(true)
     setExportControlsDisabled(true)
     ui.transcribeBtn.disabled = true
@@ -220,11 +228,20 @@ export function createVideoExporter(options: VideoExportOptions) {
         )
       }
       await exportWithRecorder(segments, settings, fallbackReason)
+    } catch (error: any) {
+      if (error?.name !== "AbortError") throw error
+      modal.setExportStage(tt("generationCanceled"), "ok")
+      ui.exportHint.hidden = true
+      ui.exportCancel.hidden = true
+      ui.exportClose.hidden = false
     } finally {
       setExporting(false)
       ui.backBtn.disabled = false
       ui.transcribeBtn.disabled = false
       enableExports(true)
+      exportAbortController = null
+      activeConversion = null
+      activeRecorder = null
     }
   }
 
@@ -257,6 +274,7 @@ export function createVideoExporter(options: VideoExportOptions) {
     } = mediabunny
 
     modal.openExportModal()
+    throwIfCanceled()
     modal.setExportStep("prepare", "active")
     modal.setExportStage(tt("exportStages.preparingEncoder"), "busy")
     ui.exportHint.textContent = tt("exportStages.renderingLocally")
@@ -328,6 +346,7 @@ export function createVideoExporter(options: VideoExportOptions) {
           latencyMode: "quality",
           keyFrameInterval: settings.quality === "optimized" ? 4 : 2,
           process: (sample: any) => {
+            throwIfCanceled()
             if (!ctx) {
               canvas = new OffscreenCanvas(
                 sample.displayWidth,
@@ -347,6 +366,7 @@ export function createVideoExporter(options: VideoExportOptions) {
           },
         },
       })
+      activeConversion = conversion
     } catch (e) {
       console.warn("[export] WebCodecs init failed, falling back", e)
       return {
@@ -391,6 +411,7 @@ export function createVideoExporter(options: VideoExportOptions) {
     }
 
     conversion.onProgress = (p: number) => {
+      throwIfCanceled()
       modal.setExportProgress(Math.min(95, p * 95))
     }
 
@@ -401,6 +422,7 @@ export function createVideoExporter(options: VideoExportOptions) {
     try {
       await conversion.execute()
     } catch (e: any) {
+      if (exportAbortController?.signal.aborted) throw e
       console.error(e)
       return {
         handled: false,
@@ -409,6 +431,7 @@ export function createVideoExporter(options: VideoExportOptions) {
         }),
       }
     }
+    throwIfCanceled()
 
     modal.setExportStep("render", "done")
     modal.setExportStep("encode", "done")
@@ -426,6 +449,7 @@ export function createVideoExporter(options: VideoExportOptions) {
     ui.exportTitle.textContent = tt("exportStages.complete")
     ui.exportHint.hidden = true
     ui.exportClose.hidden = false
+    ui.exportCancel.hidden = true
     setStatus(tt("videoExported"), "ok")
     return { handled: true }
   }
@@ -438,6 +462,7 @@ export function createVideoExporter(options: VideoExportOptions) {
     const video = ui.video
 
     modal.openExportModal()
+    throwIfCanceled()
     if (fallbackReason) {
       modal.setExportNotice(tt("exportStages.webcodecsFallbackNotice"))
     }
@@ -490,6 +515,7 @@ export function createVideoExporter(options: VideoExportOptions) {
         mimeType,
         videoBitsPerSecond: videoBitrateFor(settings.quality, w, h),
       })
+      activeRecorder = recorder
     } catch (e) {
       console.error(e)
       modal.failExport(tt("exportErrors.recordStart"))
@@ -503,6 +529,10 @@ export function createVideoExporter(options: VideoExportOptions) {
 
     const finished = new Promise<void>((resolve) => {
       recorder.onstop = () => {
+        if (exportAbortController?.signal.aborted) {
+          resolve()
+          return
+        }
         modal.setExportStep("render", "done")
         modal.setExportStep("encode", "active")
         modal.setExportStage(tt("exportStages.generatingFile"), "busy")
@@ -546,6 +576,10 @@ export function createVideoExporter(options: VideoExportOptions) {
     const onEnded = () => stopRecording()
 
     const tick = () => {
+      if (exportAbortController?.signal.aborted) {
+        stopRecording()
+        return
+      }
       if (ctx) drawFrame(ctx, video, w, h, segments)
       const dur = video.duration
       if (dur && isFinite(dur)) {
@@ -576,6 +610,7 @@ export function createVideoExporter(options: VideoExportOptions) {
     }
 
     await finished
+    throwIfCanceled()
 
     video.muted = wasMuted
     video.volume = previousVolume
@@ -587,10 +622,25 @@ export function createVideoExporter(options: VideoExportOptions) {
     ui.exportTitle.textContent = tt("exportStages.complete")
     ui.exportHint.hidden = true
     ui.exportClose.hidden = false
+    ui.exportCancel.hidden = true
     setStatus(tt("videoExported"), "ok")
+  }
+
+  function cancelExport() {
+    if (!exportAbortController || exportAbortController.signal.aborted) return
+    exportAbortController.abort()
+    ui.exportCancel.disabled = true
+    ui.video.pause()
+    try {
+      activeConversion?.cancel?.()
+    } catch {}
+    try {
+      if (activeRecorder && activeRecorder.state !== "inactive") activeRecorder.stop()
+    } catch {}
   }
 
   return {
     downloadVideo,
+    cancelExport,
   }
 }

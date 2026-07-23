@@ -1,0 +1,33 @@
+---
+import Close from "@/assets/svg/close.svg"
+import { useTranslations } from "@/i18n/ui"
+
+const t = useTranslations(Astro.currentLocale)
+---
+
+<div id="compare-modal" class="utility-modal" hidden>
+  <div id="compare-backdrop" class="utility-backdrop"></div>
+  <section class="utility-dialog compare-dialog" role="dialog" aria-modal="true" aria-labelledby="compare-title">
+    <header class="utility-head">
+      <div>
+        <h2 id="compare-title">{t.compare.title}</h2>
+        <p id="compare-subtitle">{t.compare.hint}</p>
+      </div>
+      <button id="compare-close" class="utility-close" type="button" aria-label={t.compare.close}>
+        <Close />
+      </button>
+    </header>
+    <div class="compare-toolbar">
+      <button id="compare-select-issues" class="btn-ghost" type="button">{t.compare.selectIssues}</button>
+      <button id="compare-retranslate" class="btn-primary" type="button">{t.compare.retranslate}</button>
+      <button id="compare-cancel" class="btn-ghost" type="button" hidden>{t.compare.cancel}</button>
+      <span id="compare-status" class="utility-status" role="status" aria-live="polite"></span>
+    </div>
+    <div class="compare-columns" aria-hidden="true">
+      <span>{t.compare.source}</span>
+      <span>{t.compare.target}</span>
+    </div>
+    <div id="compare-list" class="compare-list"></div>
+  </section>
+</div>
+

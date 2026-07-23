@@ -16,6 +16,8 @@ export function createExportModal({ ui, tt, isExporting }: any) {
     ui.exportError.hidden = true
     ui.exportError.textContent = ""
     ui.exportClose.hidden = true
+    ui.exportCancel.hidden = false
+    ui.exportCancel.disabled = false
     ui.exportTitle.textContent = tt("exportStages.exporting")
     ui.exportHint.hidden = false
     setExportStep("prepare", "active")
@@ -58,6 +60,7 @@ export function createExportModal({ ui, tt, isExporting }: any) {
     ui.exportError.hidden = false
     ui.exportHint.hidden = true
     ui.exportClose.hidden = false
+    ui.exportCancel.hidden = true
   }
 
   return {

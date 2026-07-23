@@ -41,6 +41,9 @@ const t = useTranslations(Astro.currentLocale)
     <div class="export-foot">
       <span id="export-pct" class="export-pct">0%</span>
       <span id="export-hint" class="export-hint">{t.export.hint}</span>
+      <button id="export-cancel" class="btn-ghost export-cancel" type="button">
+        {t.export.cancel}
+      </button>
     </div>
 
     <ul id="export-steps" class="export-steps"></ul>

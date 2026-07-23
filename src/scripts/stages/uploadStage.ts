@@ -1,4 +1,10 @@
 import { prettifyBytes } from "@/scripts/file.ts";
+import {
+  formatServiceName,
+  importMediaFromUrl,
+  UrlImportError,
+  type UrlImportProgress,
+} from "@/scripts/media/urlImport.ts";
 import type { Stage } from "@/scripts/stageManager.ts";
 import type { ui as appUi } from "@/scripts/ui.ts";
 
@@ -18,8 +24,8 @@ type UploadStageOptions = {
   renderSegments: () => void;
   enableExports: (on: boolean) => void;
   resetHistory: () => void;
-  startEarlyTranscription: (file: File) => void;
   resetTranscriptionCache: () => void;
+  onNewProject?: (file: File) => void;
 };
 
 function isVideoFile(file: File) {
@@ -56,11 +62,12 @@ export function createUploadStageController({
   renderSegments,
   enableExports,
   resetHistory,
-  startEarlyTranscription,
   resetTranscriptionCache,
+  onNewProject,
 }: UploadStageOptions) {
   let dragDepth = 0;
   let unsupportedTimer: number | undefined;
+  let urlImportBusy = false;
   const dropzoneCopy = {
     defaultLabel:
       ui.dropzone.dataset.defaultLabel || ui.dropzoneLabel.textContent || "",
@@ -73,6 +80,119 @@ export function createUploadStageController({
     unsupportedHint:
       ui.dropzone.dataset.unsupportedHint || ui.dropzoneHint.textContent || "",
   };
+
+  function setUrlStatus(message: string, kind: "" | "ok" | "error" = "") {
+    if (!ui.urlStatus) return;
+    ui.urlStatus.textContent = message;
+    ui.urlStatus.classList.toggle("is-ok", kind === "ok");
+    ui.urlStatus.classList.toggle("is-error", kind === "error");
+  }
+
+  function setUrlProgress(progress: UrlImportProgress | null) {
+    if (!ui.urlProgress || !ui.urlProgressFill || !ui.urlProgressPct) return;
+
+    if (!progress) {
+      ui.urlProgress.hidden = true;
+      ui.urlProgress.classList.remove("is-indeterminate");
+      ui.urlProgressFill.style.width = "0%";
+      ui.urlProgressPct.textContent = "0%";
+      return;
+    }
+
+    ui.urlProgress.hidden = false;
+    if (progress.percent == null) {
+      ui.urlProgress.classList.add("is-indeterminate");
+      ui.urlProgressFill.style.width = "35%";
+      ui.urlProgressPct.textContent = "…";
+      return;
+    }
+
+    ui.urlProgress.classList.remove("is-indeterminate");
+    const pct = Math.max(0, Math.min(100, progress.percent));
+    ui.urlProgressFill.style.width = `${pct}%`;
+    ui.urlProgressPct.textContent = `${pct}%`;
+  }
+
+  function setUrlImportLoading(loading: boolean) {
+    urlImportBusy = loading;
+    if (ui.urlSubmit) ui.urlSubmit.disabled = loading;
+    if (ui.urlInput) ui.urlInput.disabled = loading;
+  }
+
+  function urlImportErrorMessage(error: unknown): string {
+    if (error instanceof UrlImportError) {
+      switch (error.code) {
+        case "invalid":
+          return tt("urlImport.invalid");
+        case "unsupported":
+          return tt("urlImport.unsupported");
+        case "tooLarge":
+          return tt("urlImport.tooLarge");
+        case "notConfigured":
+          return tt("urlImport.notConfigured");
+        case "pickerUnsupported":
+          return tt("urlImport.pickerUnsupported");
+        case "serverUnavailable":
+          return tt("urlImport.serverUnavailable");
+        case "busy":
+          return tt("urlImport.busy");
+        default:
+          return tt("urlImport.failed");
+      }
+    }
+    return tt("urlImport.failed");
+  }
+
+  async function handleUrlImportSubmit(event: Event) {
+    event.preventDefault();
+    if (urlImportBusy) {
+      setUrlStatus(tt("urlImport.busy"), "error");
+      return;
+    }
+    if (isExporting()) return;
+
+    const pasteText = ui.urlInput?.value?.trim() || "";
+    if (!pasteText) {
+      setUrlStatus(tt("urlImport.invalid"), "error");
+      ui.urlInput?.focus();
+      return;
+    }
+
+    setUrlImportLoading(true);
+    setUrlStatus(tt("urlImport.resolving"));
+    setUrlProgress({ phase: "resolving", percent: null });
+
+    try {
+      const result = await importMediaFromUrl(pasteText, (progress) => {
+        setUrlProgress(progress);
+        if (progress.phase === "resolving") {
+          setUrlStatus(tt("urlImport.resolving"));
+        } else if (progress.percent == null) {
+          setUrlStatus(tt("urlImport.downloadingIndeterminate"));
+        } else {
+          setUrlStatus(
+            tt("urlImport.downloading", { pct: String(progress.percent) }),
+          );
+        }
+      });
+
+      setUrlProgress({ phase: "downloading", percent: 100 });
+      setUrlStatus(
+        tt("urlImport.videoLoadedFrom", {
+          service: formatServiceName(result.service),
+        }),
+        "ok",
+      );
+      handleSelectedFile(result.file);
+      if (ui.urlInput) ui.urlInput.value = "";
+      setUrlProgress(null);
+    } catch (error) {
+      setUrlProgress(null);
+      setUrlStatus(urlImportErrorMessage(error), "error");
+    } finally {
+      setUrlImportLoading(false);
+    }
+  }
 
   function getDraggedFileSupport(dataTransfer: DataTransfer | null) {
     const [file] = Array.from(dataTransfer?.files || []);
@@ -136,19 +256,8 @@ export function createUploadStageController({
     }
   }
 
-  function handleSelectedFile(file?: File) {
-    if (!file) return;
-    if (!isMediaFile(file)) {
-      showUnsupportedFile({ persist: true });
-      ui.input.value = "";
-      return;
-    }
-
+  function attachMediaFile(file: File) {
     const isAudio = isAudioFile(file);
-
-    resetDropzoneState();
-    resetTranscriptionCache();
-
     const previousUrl = getVideoObjectUrl();
     if (previousUrl) URL.revokeObjectURL(previousUrl);
 
@@ -176,6 +285,23 @@ export function createUploadStageController({
       ui.exportQuality.closest("label")?.removeAttribute("style");
     }
 
+    const metaText = `${file.name} · ${prettifyBytes(file.size)}`;
+    ui.meta.textContent = metaText;
+    ui.configMeta.textContent = metaText;
+  }
+
+  function handleSelectedFile(file?: File) {
+    if (!file) return;
+    if (!isMediaFile(file)) {
+      showUnsupportedFile({ persist: true });
+      ui.input.value = "";
+      return;
+    }
+
+    resetDropzoneState();
+    resetTranscriptionCache();
+    attachMediaFile(file);
+
     resetEditorState();
     ui.langTabs.innerHTML = "";
     setLangAddStatus("");
@@ -189,18 +315,34 @@ export function createUploadStageController({
 
     ui.outputLang.value = "same";
     ui.inputLang.value = "";
-    ui.wordAnimation.checked = false;
-
-    const metaText = `${file.name} · ${prettifyBytes(file.size)}`;
-    ui.meta.textContent = metaText;
-    ui.configMeta.textContent = metaText;
     setStatus(tt("videoLoaded"), "ok");
     setProgress(0);
     ui.configProgress.hidden = true;
     ui.configError.hidden = true;
     ui.configError.textContent = "";
     setStage("config");
-    startEarlyTranscription(file);
+    onNewProject?.(file);
+  }
+
+  function restoreSelectedFile(file: File | null) {
+    resetTranscriptionCache();
+    if (file) {
+      attachMediaFile(file);
+      setStatus(tt("videoLoaded"), "ok");
+      return;
+    }
+
+    const previousUrl = getVideoObjectUrl();
+    if (previousUrl) URL.revokeObjectURL(previousUrl);
+    setVideoObjectUrl("");
+    setSelectedVideoFile(null);
+    ui.video.removeAttribute("src");
+    ui.video.load();
+    ui.configVideo.removeAttribute("src");
+    ui.configVideo.load();
+    ui.downloadVideoBtn.style.display = "none";
+    ui.meta.textContent = "";
+    ui.configMeta.textContent = "";
   }
 
   function resetFlow() {
@@ -281,10 +423,23 @@ export function createUploadStageController({
       handleSelectedFile(target?.files?.[0]);
     });
     ui.configBackBtn.addEventListener("click", resetFlow);
+
+    // URL form lives next to the dropzone; stop clicks from bubbling oddly
+    // and wire submit + progressive enable of the Analyze button.
+    ui.urlImport?.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+    ui.urlImportForm?.addEventListener("submit", handleUrlImportSubmit);
+    ui.urlInput?.addEventListener("input", () => {
+      if (ui.urlStatus?.classList.contains("is-error")) {
+        setUrlStatus("");
+      }
+    });
   }
 
   return {
     handleSelectedFile,
+    restoreSelectedFile,
     resetFlow,
     attachGlobalDrop,
     wireUploadStage,

@@ -173,12 +173,18 @@ function trackStyleKey(role = "default", lang = "") {
 }
 
 export function captionStyleForTrack(role = "default", lang = "") {
-  if (!lang) return baseStyleForRole(role)
+  if (!lang) {
+    const style = baseStyleForRole(role)
+    style.wordHighlight = false
+    return style
+  }
   const key = trackStyleKey(role, lang)
   if (!captionStylesByTrack.has(key)) {
     captionStylesByTrack.set(key, cloneStyle(baseStyleForRole(role)))
   }
-  return captionStylesByTrack.get(key)
+  const style = captionStylesByTrack.get(key)
+  style.wordHighlight = false
+  return style
 }
 
 export function captionStyleForRole(role = "default", lang = "") {
@@ -344,16 +350,16 @@ export function createSubtitleStyleController({ ui, I18N }: { ui: any; I18N: any
   ) {
     tracks.forEach((track) => {
       captionStyleForTrack(track.role || "default", track.lang || "").wordHighlight =
-        enabled
+        false
     })
     applyCaptionStyle()
   }
 
   function setWordHighlightForAll(enabled: boolean) {
-    captionStyle.wordHighlight = enabled
-    transcriptionCaptionStyle.wordHighlight = enabled
+    captionStyle.wordHighlight = false
+    transcriptionCaptionStyle.wordHighlight = false
     captionStylesByTrack.forEach((style) => {
-      style.wordHighlight = enabled
+      style.wordHighlight = false
     })
     applyCaptionStyle()
   }
@@ -800,7 +806,7 @@ export function createSubtitleStyleController({ ui, I18N }: { ui: any; I18N: any
     ui.csBold.checked = c.weight >= 700
     ui.csItalic.checked = !!c.italic
     ui.csOutline.checked = !!c.outline
-    ui.csWordHighlight.checked = !!c.wordHighlight
+    if (ui.csWordHighlight) ui.csWordHighlight.checked = false
     ui.csBg.checked = !!c.bgEnabled
     ui.csBgColor.value = c.bgColor
     ui.csBgOpacity.value = String(c.bgOpacity)
@@ -859,7 +865,7 @@ export function createSubtitleStyleController({ ui, I18N }: { ui: any; I18N: any
       activeStyle().outline = ui.csOutline.checked
       onManualStyleChange()
     })
-    ui.csWordHighlight.addEventListener("change", () => {
+    ui.csWordHighlight?.addEventListener("change", () => {
       setWordHighlightForAll(ui.csWordHighlight.checked)
       onManualStyleChange()
       ui.video.dispatchEvent(new Event("timeupdate"))
@@ -902,6 +908,38 @@ export function createSubtitleStyleController({ ui, I18N }: { ui: any; I18N: any
     })
   }
 
+  function getProjectState() {
+    return {
+      styles: Object.fromEntries(
+        Array.from(captionStylesByTrack.entries()).map(([key, style]) => [
+          key,
+          cloneStyle(style),
+        ]),
+      ),
+      presets: Object.fromEntries(presetIdsByTrack.entries()),
+      activePresetId,
+      activeCaptionRole,
+      activeCaptionLang,
+    }
+  }
+
+  function restoreProjectState(state: any) {
+    captionStylesByTrack.clear()
+    presetIdsByTrack.clear()
+    for (const [key, style] of Object.entries(state?.styles || {})) {
+      captionStylesByTrack.set(key, cloneStyle(style))
+    }
+    for (const [key, preset] of Object.entries(state?.presets || {})) {
+      presetIdsByTrack.set(key, String(preset || ""))
+    }
+    activePresetId = String(state?.activePresetId || "default")
+    activeCaptionRole = String(state?.activeCaptionRole || "default")
+    activeCaptionLang = String(state?.activeCaptionLang || "")
+    syncStyleControls()
+    renderPresets()
+    applyCaptionStyle()
+  }
+
   return {
     applyCaptionStyle,
     renderCaptions,
@@ -909,6 +947,8 @@ export function createSubtitleStyleController({ ui, I18N }: { ui: any; I18N: any
     setWordHighlightForAll,
     setWordHighlightForTracks,
     setActiveTrack,
+    getProjectState,
+    restoreProjectState,
     syncStyleControls,
     wireStyleControls,
   }
