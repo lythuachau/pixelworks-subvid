@@ -1,0 +1,22 @@
+<service>
+  <id>subvid-web</id>
+  <name>Subvid Web</name>
+  <description>Loopback-only Astro Node backend for Subvid.</description>
+  <executable>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</executable>
+  <arguments>-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{{SERVICE_ROOT}}\shared\Run-Subvid.ps1" -ServiceRoot "{{SERVICE_ROOT}}" -DataRoot "{{DATA_ROOT}}" -EnvironmentFile "{{ENV_FILE}}" -ProtectedKeyFile "{{KEY_FILE}}"</arguments>
+  <workingdirectory>{{SERVICE_ROOT}}\shared</workingdirectory>
+  <startmode>Manual</startmode>
+  <stoptimeout>60sec</stoptimeout>
+  <stopparentprocessfirst>false</stopparentprocessfirst>
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <logpath>{{DATA_ROOT}}\logs</logpath>
+  <log mode="roll-by-size-time">
+    <sizeThreshold>10485760</sizeThreshold>
+    <pattern>yyyyMMdd</pattern>
+    <autoRollAtTime>00:00:00</autoRollAtTime>
+    <zipOlderThanNumDays>7</zipOlderThanNumDays>
+    <zipDateFormat>yyyyMM</zipDateFormat>
+  </log>
+</service>
