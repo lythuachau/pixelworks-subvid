@@ -56,7 +56,7 @@ foreach ($path in @($logs, $temp)) {
 foreach ($path in @($EnvironmentFile, $ProtectedKeyFile)) {
     & icacls.exe $path /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' "NT SERVICE\${serviceId}:R" | Out-Null
 }
-foreach ($path in @("C:\Program Files\nodejs", "C:\Program Files\Python312", "C:\Tools\ffmpeg")) {
+foreach ($path in @("C:\Program Files\nodejs", "C:\Program Files\Python312", "C:\Tools\ffmpeg", "C:\Tools\yt-dlp")) {
     & icacls.exe $path /grant "NT SERVICE\${serviceId}:(OI)(CI)RX" /T /C | Out-Null
 }
 

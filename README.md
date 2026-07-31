@@ -195,7 +195,7 @@ subvid.app is designed around local-first processing:
 
 - Local files are read via the File API and transcribed in the browser.
 - AI models run in Web Workers with WASM/WebGPU.
-- Optional **link import** resolves Douyin / TikTok / YouTube media through your Worker + Cobalt instance (only the share URL and media bytes for that import leave the browser).
+- Optional **link import** resolves Douyin / TikTok / YouTube media on the Node server with local `yt-dlp`; a configured Cobalt instance remains supported as an alternative.
 - No analytics backend or user accounts in this codebase.
 
 ## License

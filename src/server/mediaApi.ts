@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+
 import {
   detectMediaService,
   extractSupportedMediaUrl,
@@ -23,6 +25,7 @@ import {
 export type MediaEnv = {
   COBALT_API_URL?: string;
   COBALT_API_KEY?: string;
+  YTDLP_PATH?: string;
   MEDIA_PROXY_SECRET?: string;
   MEDIA_MAX_BYTES?: string;
   RATE_LIMITER?: RateLimitBinding;
@@ -68,6 +71,13 @@ type CobaltResponse =
   | CobaltErrorResponse
   | CobaltLocalProcessingResponse
   | { status: string };
+
+type YtDlpInfo = {
+  url?: string;
+  title?: string;
+  ext?: string;
+  requested_downloads?: Array<{ url?: string }>;
+};
 
 function json(
   body: unknown,
@@ -194,6 +204,70 @@ async function callCobalt(
   return data;
 }
 
+function runYtDlp(executable: string, mediaUrl: string): Promise<YtDlpInfo> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      executable,
+      [
+        "--no-playlist",
+        "--no-warnings",
+        "--no-progress",
+        "--skip-download",
+        "--dump-single-json",
+        "--socket-timeout",
+        "20",
+        "--format",
+        "best[ext=mp4]/best",
+        "--",
+        mediaUrl,
+      ],
+      {
+        windowsHide: true,
+        timeout: 60_000,
+        maxBuffer: 4 * 1024 * 1024,
+        encoding: "utf8",
+      },
+      (error, stdout) => {
+        if (error) {
+          reject(new Error("yt_dlp_failed"));
+          return;
+        }
+        try {
+          resolve(JSON.parse(stdout) as YtDlpInfo);
+        } catch {
+          reject(new Error("yt_dlp_invalid_json"));
+        }
+      },
+    );
+  });
+}
+
+async function resolveWithYtDlp(
+  env: MediaEnv,
+  mediaUrl: string,
+  service: MediaService,
+): Promise<{ targetUrl: string; filename: string }> {
+  const executable = String(env.YTDLP_PATH || "").trim();
+  if (!executable) throw new Error("not_configured");
+  const info = await runYtDlp(executable, mediaUrl);
+  const targetUrl = String(
+    info.url || info.requested_downloads?.find((item) => item.url)?.url || "",
+  ).trim();
+  if (!targetUrl) throw new Error("yt_dlp_missing_url");
+  const parsed = new URL(targetUrl);
+  if (
+    !["https:", "http:"].includes(parsed.protocol) ||
+    !isAllowedMediaHost(parsed.hostname, cobaltHostname(env.COBALT_API_URL))
+  ) {
+    throw new Error("yt_dlp_blocked_target");
+  }
+  const ext = String(info.ext || "mp4").replace(/[^a-z0-9]/gi, "") || "mp4";
+  return {
+    targetUrl,
+    filename: sanitizeFilename(`${info.title || service}-video.${ext}`, service),
+  };
+}
+
 async function buildDownloadPath(
   env: MediaEnv,
   targetUrl: string,
@@ -306,6 +380,32 @@ export async function handleMediaResolve(
   }
 
   if (!env.COBALT_API_URL) {
+    if (env.YTDLP_PATH) {
+      try {
+        const resolved = await resolveWithYtDlp(env, extracted.url, extracted.service);
+        return json({
+          ok: true,
+          service: extracted.service,
+          filename: resolved.filename,
+          downloadPath: await buildDownloadPath(
+            env,
+            resolved.targetUrl,
+            resolved.filename,
+          ),
+          contentType: guessContentType(resolved.filename),
+          via: "yt-dlp-local",
+        });
+      } catch {
+        return json(
+          {
+            ok: false,
+            error: "failed",
+            message: "Could not resolve this link with local yt-dlp.",
+          },
+          502,
+        );
+      }
+    }
     return json(
       {
         ok: false,

@@ -57,9 +57,10 @@ $env:ASTRO_TELEMETRY_DISABLED = "1"
 $env:PYTHON = "C:\Program Files\Python312\python.exe"
 $env:PYTHON_PATH = $env:PYTHON
 $env:FFMPEG_PATH = "C:\Tools\ffmpeg\bin\ffmpeg.exe"
+$env:YTDLP_PATH = "C:\Tools\yt-dlp\yt-dlp.exe"
 $env:TEMP = Join-Path $DataRoot "temp"
 $env:TMP = $env:TEMP
-$env:PATH = "C:\Tools\ffmpeg\bin;C:\Program Files\Python312;C:\Program Files\Python312\Scripts;$env:PATH"
+$env:PATH = "C:\Tools\yt-dlp;C:\Tools\ffmpeg\bin;C:\Program Files\Python312;C:\Program Files\Python312\Scripts;$env:PATH"
 
 $current = Join-Path $ServiceRoot "current"
 $entry = Join-Path $current "dist\server\entry.mjs"
