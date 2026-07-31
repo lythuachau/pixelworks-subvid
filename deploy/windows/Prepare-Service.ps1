@@ -59,6 +59,11 @@ foreach ($path in @($EnvironmentFile, $ProtectedKeyFile)) {
 foreach ($path in @("C:\Program Files\nodejs", "C:\Program Files\Python312", "C:\Tools\ffmpeg", "C:\Tools\yt-dlp")) {
     & icacls.exe $path /grant "NT SERVICE\${serviceId}:(OI)(CI)RX" /T /C | Out-Null
 }
+foreach ($path in @("C:\Tools\ffmpeg\bin\ffmpeg.exe", "C:\Tools\ffmpeg\bin\ffprobe.exe")) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required media tool is missing: $path" }
+    & icacls.exe $path /grant "NT SERVICE\${serviceId}:RX" /C | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Media tool ACL failed: $path" }
+}
 
 $service = Get-CimInstance Win32_Service -Filter "Name='$serviceId'"
 if ($service.State -ne "Stopped" -or $service.StartMode -ne "Manual") { throw "Prepared service is not Manual/Stopped." }
