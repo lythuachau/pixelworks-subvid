@@ -122,7 +122,6 @@ export const ui = {
   downloadsPanel: $("#downloads-panel"),
   downloadsList: $("#downloads-list"),
   statusDock: $("#status-dock"),
-  devtoolsGuardToast: $("#devtools-guard-toast"),
   timeline: $("#timeline"),
   timelineScroll: $("#timeline-scroll"),
   timelineTrack: $("#timeline-track"),

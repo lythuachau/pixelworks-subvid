@@ -396,7 +396,41 @@ export function normalizeLanguageCode(code: string): string {
 
 const CJK_RE = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/
 
-/** Soft-wrap subtitle text into at most `maxLines` lines of ~`maxChars`. */
+function joinWrapToken(line: string, token: string, isCjk: boolean) {
+  if (!line) return token
+  return isCjk ? `${line}${token}` : `${line} ${token}`
+}
+
+function wrapTokens(text: string, isCjk: boolean) {
+  return isCjk ? Array.from(text) : text.split(/\s+/).filter(Boolean)
+}
+
+/** Greedy-wrap tokens at `width`, returning every line the text needs. */
+function greedyWrap(tokens: string[], width: number, isCjk: boolean): string[] {
+  const lines: string[] = []
+  let current = ""
+  for (const token of tokens) {
+    const candidate = joinWrapToken(current, token, isCjk)
+    if (!current || candidate.length <= width) {
+      current = candidate
+      continue
+    }
+    lines.push(current)
+    current = token
+  }
+  if (current) lines.push(current)
+  return lines
+}
+
+/**
+ * Soft-wrap subtitle text into at most `maxLines` lines of ~`maxChars`.
+ *
+ * Text too long for the box is spread evenly across the available lines rather
+ * than dumped into the last one. Translating zh→vi grows a cue by roughly 3x,
+ * and the old dump turned a 42-char limit into a 78-char second line: one short
+ * line above a wall of text. Overflow is only made legible here — the cue still
+ * needs `splitOversizedCues` to actually carry that much text.
+ */
 export function wrapSubtitleText(
   text: string,
   maxChars = 42,
@@ -408,35 +442,28 @@ export function wrapSubtitleText(
   if (!cleaned || cleaned.length <= maxChars) return cleaned
 
   const isCjk = CJK_RE.test(cleaned)
-  const tokens = isCjk
-    ? Array.from(cleaned)
-    : cleaned.split(/\s+/).filter(Boolean)
+  const tokens = wrapTokens(cleaned, isCjk)
 
-  const lines: string[] = []
-  let current = ""
+  const fitted = greedyWrap(tokens, maxChars, isCjk)
+  if (fitted.length <= maxLines) return fitted.join("\n")
 
-  const joinToken = (line: string, token: string) => {
-    if (!line) return token
-    return isCjk ? `${line}${token}` : `${line} ${token}`
-  }
-
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i]
-    const candidate = joinToken(current, token)
-    if (candidate.length <= maxChars || !current) {
-      current = candidate
-      continue
-    }
-    lines.push(current)
-    current = token
-    if (lines.length >= maxLines - 1) {
-      // Dump the rest into the last line (may exceed maxChars slightly).
-      current = tokens.slice(i).reduce((acc, t) => joinToken(acc, t), "")
-      break
+  // Overflowing: the narrowest width that still fits inside maxLines is also the
+  // most even split, so search for it instead of letting one line absorb the rest.
+  const longestToken = tokens.reduce((max, token) => Math.max(max, token.length), 0)
+  let low = Math.max(longestToken, Math.ceil(cleaned.length / maxLines))
+  let high = cleaned.length
+  let best = greedyWrap(tokens, high, isCjk)
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2)
+    const lines = greedyWrap(tokens, mid, isCjk)
+    if (lines.length <= maxLines) {
+      best = lines
+      high = mid - 1
+    } else {
+      low = mid + 1
     }
   }
-  if (current) lines.push(current)
-  return lines.slice(0, maxLines).join("\n")
+  return best.join("\n")
 }
 
 type ReflowOptions = {
@@ -561,6 +588,20 @@ function visibleTextLength(text: string) {
   return Array.from(String(text || "").replace(/\s+/g, "")).length
 }
 
+function isCjkLang(lang = "") {
+  return ["zh", "ja", "ko"].includes(lang)
+}
+
+/** Per-line character budget, mirroring DEFAULT_QUALITY_LIMITS in qualityChecks. */
+export function lineCharBudget(lang = "") {
+  return isCjkLang(lang) ? 22 : 42
+}
+
+/** Reading-speed ceiling in chars/second, mirroring DEFAULT_QUALITY_LIMITS. */
+export function readingSpeedLimit(lang = "") {
+  return isCjkLang(lang) ? 14 : 20
+}
+
 /**
  * Keep the source track as the sole timing authority. Translation may wrap text,
  * but it must never stretch/shift cues or fabricate per-word timestamps.
@@ -570,7 +611,7 @@ export function reflowTranslatedSegments(
   translated: SubtitleSegment[],
   options: ReflowOptions = {},
 ): SubtitleSegment[] {
-  const maxChars = options.maxChars ?? 42
+  const maxChars = options.maxChars ?? lineCharBudget(options.targetLang)
   const maxLines = options.maxLines ?? 2
 
   return source.map((src, index) => {
@@ -587,4 +628,244 @@ export function reflowTranslatedSegments(
       // No `words`: distributing translated characters over time is synthetic.
     }
   })
+}
+
+/** Matches DEFAULT_QUALITY_LIMITS.minCueDuration in qualityChecks.ts. */
+const MIN_CUE_DURATION = 0.75
+
+const CLAUSE_END_RE = /[,;:.!?…、，；：。！？]$/u
+
+type SplitOptions = {
+  maxChars?: number
+  maxLines?: number
+  minDuration?: number
+  targetLang?: string
+}
+
+/** Character offset at which each token ends inside the joined string. */
+function tokenEndOffsets(tokens: string[], isCjk: boolean) {
+  const offsets: number[] = []
+  let total = 0
+  tokens.forEach((token, index) => {
+    total += (index && !isCjk ? 1 : 0) + token.length
+    offsets.push(total)
+  })
+  return offsets
+}
+
+/**
+ * Cut `cleaned` into `weights.length` chunks sized by `weights`, snapping each
+ * cut to a clause boundary when one sits close enough. Splitting mid-phrase is
+ * what makes a broken-up cue read worse than the long one it replaced.
+ */
+function splitTextByWeights(cleaned: string, weights: number[], isCjk: boolean) {
+  const parts = weights.length
+  const tokens = wrapTokens(cleaned, isCjk)
+  if (parts < 2 || tokens.length < parts) return [cleaned]
+
+  const offsets = tokenEndOffsets(tokens, isCjk)
+  const total = offsets[offsets.length - 1]
+  const weightTotal = weights.reduce((sum, value) => sum + value, 0) || 1
+  // A clause boundary is worth drifting up to 30% of an average chunk to reach.
+  const bonus = (total / parts) * 0.3
+
+  const cuts: number[] = []
+  let from = 0
+  let weightSoFar = 0
+  for (let part = 1; part < parts; part += 1) {
+    weightSoFar += weights[part - 1]
+    const ideal = (total * weightSoFar) / weightTotal
+    const limit = tokens.length - (parts - part)
+    if (from > limit) break
+    let bestIndex = -1
+    let bestCost = Infinity
+    for (let index = from; index <= limit; index += 1) {
+      const cost =
+        Math.abs(offsets[index] - ideal) -
+        (CLAUSE_END_RE.test(tokens[index]) ? bonus : 0)
+      if (cost < bestCost) {
+        bestCost = cost
+        bestIndex = index
+      }
+    }
+    if (bestIndex < 0) break
+    cuts.push(bestIndex)
+    from = bestIndex + 1
+  }
+
+  const chunks: string[] = []
+  let start = 0
+  for (const cut of [...cuts, tokens.length - 1]) {
+    const slice = tokens.slice(start, cut + 1)
+    if (slice.length) {
+      chunks.push(
+        slice.reduce((acc, token) => joinWrapToken(acc, token, isCjk), ""),
+      )
+    }
+    start = cut + 1
+  }
+  return chunks.length ? chunks : [cleaned]
+}
+
+/**
+ * Split one cue whose text no longer fits its own box into consecutive sub-cues
+ * that tile `[start, end]` exactly — no shift, no stretch, so the source track
+ * stays the only timing authority.
+ *
+ * This cannot improve reading speed: the same characters still have the same
+ * seconds. It exists so translated text stops piling into one unreadable line.
+ * Cues too short to divide without dropping under `minDuration` are returned
+ * whole, wrapped as evenly as possible.
+ */
+export function splitOversizedCue(
+  cue: SubtitleSegment,
+  options: SplitOptions = {},
+): SubtitleSegment[] {
+  const maxChars = options.maxChars ?? lineCharBudget(options.targetLang)
+  const maxLines = options.maxLines ?? 2
+  const minDuration = options.minDuration ?? MIN_CUE_DURATION
+  const capacity = Math.max(1, maxChars * maxLines)
+  const cleaned = String(cue.text || "").replace(/\s+/g, " ").trim()
+  const duration = cue.end - cue.start
+  // Most cues pass through. Keep them byte-identical — including any fields
+  // this module does not know about, and any still-valid word timings — and
+  // rewrap only when the text actually needs it.
+  const unsplit = () => {
+    const wrapped = cleaned ? wrapSubtitleText(cleaned, maxChars, maxLines) : ""
+    return [wrapped === cue.text ? cue : { ...cue, text: wrapped }]
+  }
+
+  if (
+    !cleaned ||
+    cleaned.length <= capacity ||
+    !Number.isFinite(duration) ||
+    duration < minDuration * 2
+  ) {
+    return unsplit()
+  }
+
+  const parts = Math.min(
+    Math.ceil(cleaned.length / capacity),
+    Math.floor(duration / minDuration),
+  )
+  if (parts < 2) return unsplit()
+
+  const isCjk = CJK_RE.test(cleaned)
+  const chunks = splitTextByWeights(cleaned, Array(parts).fill(1), isCjk)
+  if (chunks.length < 2) return unsplit()
+
+  const lengths = chunks.map((chunk) => Math.max(1, chunk.length))
+  const total = lengths.reduce((sum, value) => sum + value, 0)
+  const bounds = [cue.start]
+  let consumed = 0
+  for (let index = 0; index < chunks.length - 1; index += 1) {
+    consumed += lengths[index]
+    bounds.push(cue.start + (duration * consumed) / total)
+  }
+  bounds.push(cue.end)
+
+  // Interior boundaries only: the outer edges must stay bit-identical to the
+  // source cue so the split is invisible to the timeline.
+  for (let index = 1; index < bounds.length - 1; index += 1) {
+    bounds[index] = Math.round(bounds[index] * 1000) / 1000
+  }
+  for (let index = 1; index < bounds.length - 1; index += 1) {
+    bounds[index] = Math.max(bounds[index], bounds[index - 1] + minDuration)
+  }
+  for (let index = bounds.length - 2; index >= 1; index -= 1) {
+    bounds[index] = Math.min(bounds[index], bounds[index + 1] - minDuration)
+  }
+
+  return chunks.map((chunk, index) => ({
+    start: bounds[index],
+    end: bounds[index + 1],
+    text: wrapSubtitleText(chunk, maxChars, maxLines),
+    speaker: cue.speaker,
+  }))
+}
+
+/** Apply `splitOversizedCue` across a whole translated track. */
+export function splitOversizedCues(
+  segments: SubtitleSegment[],
+  options: SplitOptions = {},
+): SubtitleSegment[] {
+  return segments.flatMap((segment) => splitOversizedCue(segment, options))
+}
+
+type SentenceGroupOptions = {
+  maxGap?: number
+  maxCues?: number
+  maxChars?: number
+}
+
+/**
+ * Group consecutive cues that are fragments of one spoken sentence.
+ *
+ * Whisper cuts mid-sentence, and a model handed a bare fragment pads it into a
+ * whole clause — which is where piled-up text starts. Only unambiguous
+ * continuations join a group (no terminal punctuation before the next cue,
+ * near-continuous timing, same speaker, both sides non-empty), so anything that
+ * already reads as a sentence is still translated on its own.
+ */
+export function groupSentenceCues(
+  segments: SubtitleSegment[],
+  options: SentenceGroupOptions = {},
+): number[][] {
+  const maxGap = options.maxGap ?? 0.35
+  const maxCues = options.maxCues ?? 3
+  const maxChars = options.maxChars ?? 120
+  const groups: number[][] = []
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index]
+    const current = groups[groups.length - 1]
+    const previous = current ? segments[current[current.length - 1]] : null
+    const joinable =
+      !!current &&
+      !!previous &&
+      current.length < maxCues &&
+      !!String(previous.text || "").trim() &&
+      !!String(segment.text || "").trim() &&
+      Math.max(0, segment.start - previous.end) <= maxGap &&
+      !SENTENCE_END_RE.test(previous.text || "") &&
+      (!previous.speaker ||
+        !segment.speaker ||
+        previous.speaker === segment.speaker) &&
+      current.reduce(
+        (sum, member) => sum + visibleTextLength(segments[member].text),
+        0,
+      ) +
+        visibleTextLength(segment.text) <=
+        maxChars
+
+    if (joinable) current.push(index)
+    else groups.push([index])
+  }
+  return groups
+}
+
+/**
+ * Spread one translated sentence back over the source cues it was built from,
+ * proportional to each cue's share of the source characters.
+ *
+ * Returns exactly `sourceTexts.length` strings so the caller keeps its 1:1 cue
+ * mapping. When the translation has fewer words than there are cues to fill,
+ * the whole sentence stays in the first cue rather than being chopped to pieces.
+ */
+export function distributeTranslatedText(
+  translated: string,
+  sourceTexts: string[],
+): string[] {
+  const cleaned = String(translated || "").replace(/\s+/g, " ").trim()
+  if (sourceTexts.length <= 1) return [cleaned]
+  if (!cleaned) return sourceTexts.map(() => "")
+
+  const isCjk = CJK_RE.test(cleaned)
+  if (wrapTokens(cleaned, isCjk).length < sourceTexts.length) {
+    return sourceTexts.map((_, index) => (index === 0 ? cleaned : ""))
+  }
+
+  const weights = sourceTexts.map((text) => Math.max(1, visibleTextLength(text)))
+  const chunks = splitTextByWeights(cleaned, weights, isCjk)
+  return sourceTexts.map((_, index) => chunks[index] ?? "")
 }

@@ -45,6 +45,12 @@ export type CustomTranslateOptions = {
   geminiApiKey?: string
   protocol?: CustomTranslateProtocol
   glossary?: string[]
+  /**
+   * Per-line character ceiling, one entry per text. Lets the server tell the
+   * model how much room each line has on screen so translations stop
+   * overflowing the cue they belong to.
+   */
+  budgets?: number[]
   signal?: AbortSignal
 }
 
@@ -302,6 +308,13 @@ export async function translateTextsWithGoogle(
     target: targetLang,
     provider,
     glossary: (options.glossary || []).filter(Boolean),
+  }
+  // Only send budgets when they line up with the texts, so a stale or partial
+  // array can never shift limits onto the wrong lines.
+  if (options.budgets?.length === texts.length) {
+    body.budgets = options.budgets.map((value) =>
+      Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0,
+    )
   }
 
   if (provider === "custom" || provider === "auto") {

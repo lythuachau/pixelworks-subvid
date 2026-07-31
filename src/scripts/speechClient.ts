@@ -4,11 +4,19 @@ export type SpeechSegment = {
   text: string
 }
 
+export type SpeechWord = {
+  id: string
+  start: number
+  end: number
+  text: string
+}
+
 export type GroqTranscription = {
   model: string
   language: string
   duration?: number
   segments: SpeechSegment[]
+  words: SpeechWord[]
 }
 
 function writeAscii(view: DataView, offset: number, value: string) {
@@ -85,10 +93,26 @@ export async function transcribeAudioWithGroq(
           text: String(segment.text || "").trim(),
         }))
         .filter((segment: SpeechSegment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start && segment.text),
+      words: Array.isArray(data.words)
+        ? data.words
+            .map((word: any, index: number) => ({
+              id: String(word.id || `w${index + 1}`),
+              start: Number(word.start),
+              end: Number(word.end),
+              text: String(word.text ?? word.word ?? "").trim(),
+            }))
+            .filter(
+              (word: SpeechWord) =>
+                word.id &&
+                Number.isFinite(word.start) &&
+                Number.isFinite(word.end) &&
+                word.end > word.start &&
+                word.text,
+            )
+        : [],
     }
   } finally {
     window.clearTimeout(timeout)
     options.signal?.removeEventListener("abort", abort)
   }
 }
-

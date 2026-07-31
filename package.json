@@ -10,7 +10,7 @@
     "dev": "astro dev",
     "dev:local": "node ./scripts/dev-local.mjs",
     "build": "astro build",
-    "test": "node --experimental-strip-types --test tests/apiAdmin.test.ts tests/ocrAlignment.test.ts tests/subtitleTools.test.ts tests/speechApi.test.ts",
+    "test": "node --experimental-strip-types --test tests/apiAdmin.test.ts tests/cuePlan.test.ts tests/mediaToken.test.ts tests/netGuard.test.ts tests/ocrAlignment.test.ts tests/subtitleTools.test.ts tests/speechApi.test.ts",
     "preview": "astro preview",
     "astro": "astro",
     "deploy": "astro build && wrangler deploy"

@@ -3,6 +3,7 @@ import {
   saveTranslateSettings,
   type TranslateProvider,
 } from "@/scripts/googleTranslateClient.ts"
+import { planAndTranslateSubtitleCues } from "@/scripts/cuePlanClient.ts"
 import { createAudioService } from "@/scripts/media/audio.ts"
 import { normalizeLanguageCode } from "@/scripts/subtitles.ts"
 import { transcribeAudioWithGroq } from "@/scripts/speechClient.ts"
@@ -177,15 +178,53 @@ export function createConfigStageController({
         signal: generationController.signal,
         onProgress: (percent) => setProgress(percent),
       })
-      const baseSegments = transcript.segments.map((segment) => ({ ...segment }))
-      if (!baseSegments.length) throw new Error(tt("config.groqNoSegments"))
+      const rawBaseSegments = transcript.segments.map((segment) => ({ ...segment }))
+      if (!rawBaseSegments.length) throw new Error(tt("config.groqNoSegments"))
 
       const sourceLang = normalizeLanguageCode(transcript.language) || normalizeLanguageCode(sourceHint || "") || "zh"
       if (ui.inputLang && !ui.inputLang.value) ui.inputLang.value = sourceLang
       const targetLang = ui.outputLang?.value || "same"
-      const translated = targetLang && targetLang !== "same" && targetLang !== sourceLang
-        ? await translateSegments(baseSegments, sourceLang, targetLang)
-        : undefined
+      let baseSegments = rawBaseSegments
+      let translated: Segment[] | undefined
+      if (targetLang && targetLang !== "same" && targetLang !== sourceLang) {
+        if (transcript.words.length) {
+          try {
+            setStatus(tt("config.translatingTo", { lang: targetLang }), "busy")
+            const planned = await planAndTranslateSubtitleCues(
+              transcript.words,
+              rawBaseSegments,
+              sourceLang,
+              targetLang,
+              { signal: generationController.signal },
+            )
+            baseSegments = planned.sourceSegments
+            translated = planned.translatedSegments
+            console.info(
+              `[cue-plan] ${planned.inputWords} words → ${planned.outputCues} cues ` +
+                `model=${planned.model}`,
+            )
+          } catch (error) {
+            console.warn(
+              "[cue-plan] AI grouping failed; using stable translation fallback",
+              error,
+            )
+            baseSegments = rawBaseSegments
+            translated = await translateSegments(
+              rawBaseSegments,
+              sourceLang,
+              targetLang,
+              { signal: generationController.signal },
+            )
+          }
+        } else {
+          translated = await translateSegments(
+            rawBaseSegments,
+            sourceLang,
+            targetLang,
+            { signal: generationController.signal },
+          )
+        }
+      }
       const segmentsByLang: SegmentsByLang = { [sourceLang]: baseSegments }
       const orderedLangs = [sourceLang]
       let activeLang = sourceLang

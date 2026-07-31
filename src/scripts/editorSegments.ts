@@ -22,7 +22,12 @@ type EditorSegmentsOptions = {
   setOrderedLangs: (langs: string[]) => void
   setSegmentsForLang: (lang: string, segments: any[]) => void
   trackLabel: (lang: string) => string
-  translateSegments: (segments: any[], source: string, target: string) => Promise<any[]>
+  translateSegments: (
+    segments: any[],
+    source: string,
+    target: string,
+    options?: { signal?: AbortSignal; splitLongCues?: boolean },
+  ) => Promise<any[]>
   /** Whether a translation model is already loaded (false ⇒ a download is pending). */
   isTranslationReady: () => boolean
   snapshotSegments: () => string
@@ -383,6 +388,9 @@ export function createEditorSegmentsController(options: EditorSegmentsOptions) {
       source.slice(start, end),
       sourceLang,
       targetLang,
+      // This path maps results back by index onto the existing track, so cues
+      // must stay 1:1 with the slice that was sent.
+      { splitLongCues: false },
     )
     const before = snapshotSegments()
     for (const index of wanted) {

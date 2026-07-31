@@ -1,3 +1,11 @@
+import { isInternalHost } from "./netGuard.ts"
+import {
+  buildCuePlanPrompt,
+  materializeCuePlan,
+  normalizeCuePlanWords,
+  splitCuePlanWords,
+} from "./cuePlan.ts"
+
 type TranslateEnv = {
   CUSTOM_TRANSLATE_BASE_URL?: string
   CUSTOM_TRANSLATE_API_KEY?: string
@@ -46,12 +54,68 @@ function baseUrl(value: unknown) {
   return String(value || "").trim().replace(/\/+$/, "").replace(/\/v1$/i, "")
 }
 
+/**
+ * Resolve the custom endpoint + key for one request.
+ *
+ * The server-side key is only ever paired with the server-side endpoint. When
+ * the caller supplies their own `baseUrl` they must supply the matching key
+ * too; otherwise an authenticated admin — who by design can never read the
+ * stored key — could exfiltrate it just by pointing baseUrl at a host they
+ * control and reading the inbound Authorization header.
+ */
+function resolveCustomCredentials(
+  body: { baseUrl?: unknown; endpoint?: unknown; apiKey?: unknown; key?: unknown },
+  stored: { baseUrl: string; apiKey: string },
+) {
+  const requestedBase = baseUrl(body.baseUrl || body.endpoint || "")
+  const requestedKey = String(body.apiKey || body.key || "").trim()
+  const usesStoredEndpoint = !requestedBase || requestedBase === stored.baseUrl
+  return {
+    base: requestedBase || stored.baseUrl,
+    key: requestedKey || (usesStoredEndpoint ? stored.apiKey : ""),
+  }
+}
+
+/**
+ * True when `url` points at infrastructure rather than a public API.
+ *
+ * `ALLOW_PRIVATE_TRANSLATE_ENDPOINT=1` exists only so the test suite (and
+ * `wrangler dev`) can target a loopback stub. Never set it in production —
+ * it re-opens the endpoint field as an SSRF primitive.
+ */
+function endpointBlocked(env: TranslateEnv, url: string) {
+  if (!url) return false
+  if (String(env.ALLOW_PRIVATE_TRANSLATE_ENDPOINT || "") === "1") return false
+  return isInternalHost(hostname(url))
+}
+
+function blockedEndpointResponse() {
+  return json(
+    {
+      ok: false,
+      error: "blocked_endpoint",
+      message: "Endpoint nội bộ hoặc IP riêng không được phép.",
+    },
+    400,
+  )
+}
+
 function hostname(value: string) {
   try {
     return new URL(value).hostname.toLowerCase()
   } catch {
     return ""
   }
+}
+
+/**
+ * Hosts that speak the native Anthropic wire protocol, where `x-api-key` is the
+ * only accepted credential. Everything else — LiteLLM, one-api, new-api and the
+ * other aggregators — fronts Claude with an OpenAI-style Bearer gate.
+ */
+export function isNativeAnthropicHost(endpoint: string) {
+  const host = hostname(baseUrl(endpoint))
+  return host === "anthropic.com" || host.endsWith(".anthropic.com")
 }
 
 export function resolveCustomProtocol(
@@ -69,7 +133,10 @@ export function resolveCustomProtocol(
   if (requested === "anthropic") return "anthropic"
   if (requested === "responses") return "responses"
   if (requested === "openai") return "openai"
-  return /^claude(?:-|$)/i.test(model) ? "anthropic" : "openai"
+  // The wire protocol belongs to the endpoint, not the model. Guessing
+  // "anthropic" from a claude-* model name pointed Anthropic-shaped requests at
+  // OpenAI-only gateways, so every Claude model failed while GPT ones worked.
+  return isNativeAnthropicHost(endpoint) ? "anthropic" : "openai"
 }
 
 function envString(env: TranslateEnv, key: keyof TranslateEnv) {
@@ -91,7 +158,13 @@ function parseNumbered(text: unknown, count: number) {
   const numbered = new Map<number, string>()
   for (const line of String(text || "").replace(/\r/g, "").split("\n")) {
     const match = line.match(/^\s*(\d+)\s*[.)：:\-]\s*(.*?)\s*$/)
-    if (match) numbered.set(Number(match[1]) - 1, match[2].trim())
+    // Models sometimes echo the "(max 84)" length hint back; strip it so the
+    // marker never leaks onto the screen.
+    if (match)
+      numbered.set(
+        Number(match[1]) - 1,
+        match[2].replace(/^\(\s*max\s*\d+\s*\)\s*/i, "").trim(),
+      )
   }
   if (numbered.size >= Math.ceil(count * 0.6)) {
     numbered.forEach((value, index) => {
@@ -102,11 +175,36 @@ function parseNumbered(text: unknown, count: number) {
   return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, count)
 }
 
-function promptFor(texts: string[], source: string, target: string) {
+export function promptFor(
+  texts: string[],
+  source: string,
+  target: string,
+  budgets: number[] = [],
+) {
+  // A cue is on screen for a fixed number of seconds, so length is part of the
+  // task, not a formatting preference. When the caller knows how much room a
+  // line has, spell it out per line; verbose output is what makes translated
+  // subtitles pile up into unreadable blocks.
+  const useBudgets = budgets.length === texts.length
   return [
     `Translate subtitle cues from ${source} to natural spoken ${target}.`,
     `Output exactly ${texts.length} numbered lines in the same order. Do not add commentary.`,
-    ...texts.map((text, index) => `${index + 1}. ${String(text).replace(/\r?\n/g, " ").trim()}`),
+    ...(useBudgets
+      ? [
+          "Each line is an on-screen subtitle with limited space. The number in",
+          "parentheses is the maximum characters allowed for that line — stay at or",
+          "under it. Keep the meaning but be concise: drop filler words, honorifics",
+          "and repetition rather than exceeding the limit. Never output the",
+          "parentheses marker itself.",
+        ]
+      : []),
+    ...texts.map((text, index) => {
+      const cleaned = String(text).replace(/\r?\n/g, " ").trim()
+      const budget = useBudgets ? Number(budgets[index]) : 0
+      return Number.isFinite(budget) && budget > 0
+        ? `${index + 1}. (max ${Math.round(budget)}) ${cleaned}`
+        : `${index + 1}. ${cleaned}`
+    }),
   ].join("\n")
 }
 
@@ -189,6 +287,216 @@ export function parseCustomApiResponse(
   return deltas.join("") || finalText
 }
 
+function parseStructuredJson(raw: unknown) {
+  let value = String(raw || "").trim()
+  if (value.startsWith("```")) {
+    const newline = value.indexOf("\n")
+    value = newline >= 0 ? value.slice(newline + 1) : value.slice(3)
+    if (value.trimEnd().endsWith("```"))
+      value = value.trimEnd().slice(0, -3).trim()
+  }
+  return JSON.parse(value)
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  task: (item: T, index: number) => Promise<R>,
+) {
+  const output = new Array<R>(items.length)
+  let cursor = 0
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      output[index] = await task(items[index], index)
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+  )
+  return output
+}
+
+async function handleCuePlanRequest(
+  body: any,
+  env: TranslateEnv,
+) {
+  const words = normalizeCuePlanWords(body?.words)
+  const segments = Array.isArray(body?.segments) ? body.segments : []
+  const source = String(body?.source || body?.sourceLang || "").trim()
+  const target = String(body?.target || body?.targetLang || "").trim()
+  if (!words.length || !source || !target)
+    return json(
+      {
+        ok: false,
+        error: "invalid_input",
+        message: "Timestamped words, source, and target are required.",
+      },
+      400,
+    )
+  if (words.length > 900)
+    return json(
+      {
+        ok: false,
+        error: "too_many_words",
+        message: "AI cue planning supports at most 900 word units.",
+      },
+      413,
+    )
+
+  const d = defaults(env)
+  const provider = String(body.provider || "auto").toLowerCase()
+  const { base: customBase, key: customKey } = resolveCustomCredentials(body, d)
+  if (endpointBlocked(env, customBase)) return blockedEndpointResponse()
+  const customModels =
+    Array.isArray(body.models) && body.models.length
+      ? body.models.map(String)
+      : d.models
+  const customModel = String(
+    body.model || customModels[0] || d.model,
+  ).trim()
+  const useCustom =
+    provider === "custom" ||
+    (provider === "auto" && Boolean(customBase && customKey))
+  const useGemini = provider === "gemini" || (provider === "auto" && !useCustom)
+  const protocol = useCustom
+    ? resolveCustomProtocol(
+        body.protocol || d.protocol || "auto",
+        customBase,
+        customModel,
+      )
+    : undefined
+  const geminiKey = String(
+    body.geminiApiKey || envString(env, "GEMINI_API_KEY"),
+  ).trim()
+  const geminiModel = String(
+    body.model ||
+      envString(env, "GEMINI_TRANSLATE_MODEL") ||
+      "gemini-2.5-flash",
+  )
+  if (useCustom && (!customBase || !customKey || !customModel))
+    return json(
+      {
+        ok: false,
+        error: "not_configured",
+        message: "Custom endpoint, key, and model are required.",
+      },
+      503,
+    )
+  if (useGemini && !geminiKey)
+    return json(
+      {
+        ok: false,
+        error: "not_configured",
+        message: "Gemini API key is required.",
+      },
+      503,
+    )
+
+  try {
+    const chunks = splitCuePlanWords(words, segments, 80)
+    const planned = await mapWithConcurrency(chunks, 2, async (chunk) => {
+      const prompt = buildCuePlanPrompt(
+        chunk,
+        segments,
+        source,
+        target,
+      )
+      let lastError: unknown
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const retryNote =
+            attempt === 0
+              ? ""
+              : "\n\nYour previous plan violated a hard rule. Correct it now: include every mandatory hard-silence ending, keep all `to` IDs increasing, and end at the final supplied word ID."
+          const raw = useCustom
+            ? await callCustom(
+                {
+                  baseUrl: customBase,
+                  apiKey: customKey,
+                  model: customModel,
+                  protocol: protocol!,
+                },
+                prompt + retryNote,
+                100_000,
+                4096,
+              )
+            : await callGemini(
+                geminiKey,
+                geminiModel,
+                prompt + retryNote,
+                100_000,
+                4096,
+              )
+          return materializeCuePlan(chunk, parseStructuredJson(raw), {
+            targetLang: target,
+          })
+        } catch (error) {
+          lastError = error
+          const message = String(
+            error instanceof Error ? error.message : error,
+          )
+          if (
+            attempt === 0 &&
+            /cue plan|hard silence|word ID|JSON/i.test(message)
+          )
+            continue
+          throw error
+        }
+      }
+      throw lastError
+    })
+    const selections = planned.flat().map((cue) => ({
+      to: cue.sourceIds.at(-1)!,
+      translation: cue.translation,
+    }))
+    // Re-materialize against the complete transcript. This is the final proof
+    // that no chunk lost, duplicated, reordered, or mistimed a word.
+    const cues = materializeCuePlan(words, { cues: selections }, {
+      targetLang: target,
+    })
+    const engine = useCustom ? `custom:${protocol}` : "gemini"
+    const model = useCustom ? customModel : geminiModel
+    return json({
+      ok: true,
+      engine,
+      model,
+      protocol,
+      cues,
+      sourceSegments: cues.map((cue) => ({
+        start: cue.start,
+        end: cue.end,
+        text: cue.sourceText,
+      })),
+      translatedSegments: cues.map((cue) => ({
+        start: cue.start,
+        end: cue.end,
+        text: cue.translation,
+      })),
+      diagnostics: {
+        inputWords: words.length,
+        inputSegments: segments.length,
+        outputCues: cues.length,
+        chunks: chunks.length,
+      },
+    })
+  } catch (error) {
+    const candidate = error as Partial<UpstreamApiError> | null
+    const upstreamStatus = Number(candidate?.status || 0)
+    return json(
+      {
+        ok: false,
+        error: "cue_plan_failed",
+        message: String(error instanceof Error ? error.message : error),
+        upstreamStatus: upstreamStatus || undefined,
+        protocol: candidate?.protocol,
+      },
+      upstreamStatus || 502,
+    )
+  }
+}
+
 function upstreamMessage(payload: any, status: number) {
   const raw = String(
     payload?.error?.message ||
@@ -251,7 +559,10 @@ async function callCustom(
   if (cfg.protocol === "anthropic") {
     headers["x-api-key"] = cfg.apiKey
     headers["anthropic-version"] = "2023-06-01"
-    delete headers.Authorization
+    // Only native Anthropic rejects a stray Bearer token. Gateways that expose
+    // /v1/messages behind an OpenAI-style auth wall read Authorization and never
+    // look at x-api-key, so dropping it there returned "API key required".
+    if (isNativeAnthropicHost(cfg.baseUrl)) delete headers.Authorization
   }
   const response = await fetch(url, {
     method: "POST",
@@ -365,9 +676,9 @@ async function handleModels(request: Request, env: TranslateEnv) {
   let body: any = {}
   try { body = await request.json() } catch { /* use env defaults */ }
   const d = defaults(env)
-  const url = baseUrl(body.baseUrl || body.endpoint || d.baseUrl)
-  const key = String(body.apiKey || body.key || d.apiKey).trim()
+  const { base: url, key } = resolveCustomCredentials(body, d)
   if (!url || !key) return json({ ok: false, error: "not_configured", message: "baseUrl and apiKey required to list models" }, 400)
+  if (endpointBlocked(env, url)) return blockedEndpointResponse()
   try {
     const response = await fetch(`${url}/v1/models`, { headers: { Authorization: `Bearer ${key}`, "x-api-key": key }, signal: AbortSignal.timeout(15_000) })
     const payload: any = await readJson(response)
@@ -392,27 +703,47 @@ export async function handleTranslateApi(request: Request, env: TranslateEnv) {
     "/api/translate/status",
     "/api/translate/models",
     "/api/translate/gemini/models",
+    "/api/translate/cue-plan",
   ].includes(pathname)) return null
   if (pathname === "/api/translate/status") {
+    // Unauthenticated probe — booleans only. The endpoint URL, model names and
+    // protocol are infrastructure detail; the admin UI reads them from the
+    // authenticated /api/api-admin/config instead.
     const d = defaults(env)
+    const custom = !!(d.baseUrl && d.apiKey)
     const gemini = !!envString(env, "GEMINI_API_KEY")
-    return json({ ok: !!(d.baseUrl && d.apiKey) || gemini, preferred: d.baseUrl && d.apiKey ? "custom" : gemini ? "gemini" : "local", custom: { ok: !!(d.baseUrl && d.apiKey), configured: !!(d.baseUrl && d.apiKey), baseUrl: d.baseUrl, model: d.model, models: d.models, protocol: d.protocol, hasApiKey: !!d.apiKey }, gemini: { ok: gemini, configured: gemini, model: envString(env, "GEMINI_TRANSLATE_MODEL") || "gemini-2.5-flash" } })
+    return json({
+      ok: custom || gemini,
+      custom: { ok: custom, configured: custom },
+      gemini: { ok: gemini, configured: gemini },
+    })
   }
   if (request.method.toUpperCase() !== "POST") return json({ ok: false, error: "method_not_allowed", message: "POST required" }, 405)
   if (pathname === "/api/translate/gemini/models") return handleGeminiModels(request, env)
   if (pathname === "/api/translate/models") return handleModels(request, env)
   let body: any
   try { body = await request.json() } catch { return json({ ok: false, error: "bad_json", message: "Invalid JSON body" }, 400) }
+  if (pathname === "/api/translate/cue-plan")
+    return handleCuePlanRequest(body, env)
   const texts = Array.isArray(body.texts) ? body.texts.map((text: unknown) => String(text ?? "")) : []
   const source = String(body.source || body.sourceLang || "").trim()
   const target = String(body.target || body.targetLang || "").trim()
+  // Per-line character ceilings are advisory: accept them only when they match
+  // the texts one-for-one, otherwise fall back to the unbudgeted prompt.
+  const budgets =
+    Array.isArray(body.budgets) && body.budgets.length === texts.length
+      ? body.budgets.map((value: unknown) => {
+          const parsed = Number(value)
+          return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0
+        })
+      : []
   if (!texts.length) return json({ ok: true, translations: [], engine: "custom" })
   if (!source || !target) return json({ ok: false, error: "missing_langs", message: "source and target language codes are required" }, 400)
   if (source === target) return json({ ok: true, translations: texts, engine: "same-language" })
   const d = defaults(env)
   const provider = String(body.provider || "auto").toLowerCase()
-  const customBase = baseUrl(body.baseUrl || body.endpoint || d.baseUrl)
-  const customKey = String(body.apiKey || body.key || d.apiKey).trim()
+  const { base: customBase, key: customKey } = resolveCustomCredentials(body, d)
+  if (endpointBlocked(env, customBase)) return blockedEndpointResponse()
   const customModels = Array.isArray(body.models) && body.models.length ? body.models.map(String) : d.models
   const customModel = String(body.model || customModels[0] || d.model).trim()
   const useCustom = provider === "custom" || (provider === "auto" && customBase && customKey)
@@ -421,7 +752,7 @@ export async function handleTranslateApi(request: Request, env: TranslateEnv) {
   const requestTimeoutMs = isProbe ? 20_000 : 120_000
   const maxOutputTokens = isProbe ? 256 : 4096
   try {
-    const prompt = promptFor(texts, source, target)
+    const prompt = promptFor(texts, source, target, budgets)
     let raw: string
     let engine: string
     let model: string

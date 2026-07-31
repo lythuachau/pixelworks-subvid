@@ -6,7 +6,14 @@ import {
   type TranslateProvider,
 } from "@/scripts/googleTranslateClient.ts"
 import { LANGS } from "@/scripts/languages.ts"
-import { reflowTranslatedSegments } from "@/scripts/subtitles.ts"
+import {
+  distributeTranslatedText,
+  groupSentenceCues,
+  lineCharBudget,
+  readingSpeedLimit,
+  reflowTranslatedSegments,
+  splitOversizedCues,
+} from "@/scripts/subtitles.ts"
 import { sanitizeSubtitleSourceText } from "@/scripts/subtitleArtifacts.ts"
 
 const TRANSLATION_DEBUG = import.meta.env.DEV
@@ -139,6 +146,31 @@ function apiFailureMessage(error: unknown) {
   return `Dịch qua API thất bại: ${detail}`
 }
 
+/**
+ * Join the cues of one sentence back into the text sent to the API. CJK has no
+ * word spaces, so inserting them would hand the model text it never sees.
+ */
+function joinCueTexts(parts: string[], sourceLang: string) {
+  const separator = ["zh", "ja", "ko"].includes(sourceLang) ? "" : " "
+  return parts.filter(Boolean).join(separator).replace(/\s+/g, " ").trim()
+}
+
+/**
+ * How many characters this group of cues can carry: whichever is tighter, the
+ * two-line box or what a viewer can actually read in the time available. Sent to
+ * the model so it tightens wording itself instead of overflowing the cue.
+ */
+function groupCharBudget(group: number[], segments: any[], targetLang: string) {
+  const box = group.length * lineCharBudget(targetLang) * 2
+  const seconds = Math.max(
+    0,
+    segments[group[group.length - 1]].end - segments[group[0]].start,
+  )
+  const readable = Math.round(seconds * readingSpeedLimit(targetLang))
+  // A very short cue must not be squeezed so hard the model drops meaning.
+  return Math.max(24, Math.min(box, readable || box))
+}
+
 type TranslationServiceOptions = {
   downloads: any
   renderDownloads: () => void
@@ -201,6 +233,7 @@ export function createTranslationService(options: TranslationServiceOptions) {
     targetLang: string,
     signal: AbortSignal,
     provider: TranslateProvider,
+    budgets: number[] = [],
   ) {
     const saved = loadSavedTranslateSettings()
     const savedGemini = loadSavedGeminiSettings()
@@ -217,6 +250,7 @@ export function createTranslationService(options: TranslationServiceOptions) {
       geminiApiKey: provider === "gemini" ? savedGemini.apiKey : undefined,
       protocol: saved.protocol,
       glossary: glossaryForPair(sourceLang, targetLang),
+      budgets,
       signal,
     })
     if (TRANSLATION_DEBUG) {
@@ -231,7 +265,7 @@ export function createTranslationService(options: TranslationServiceOptions) {
     segments: any[],
     sourceLang: string,
     targetLang: string,
-    requestOptions: { signal?: AbortSignal } = {},
+    requestOptions: { signal?: AbortSignal; splitLongCues?: boolean } = {},
   ) {
     if (!segments.length || sourceLang === targetLang)
       return segments.map((segment) => ({ ...segment }))
@@ -257,10 +291,25 @@ export function createTranslationService(options: TranslationServiceOptions) {
           targetLang,
         ),
       )
-      const requestIndices = preparedTexts
-        .map((text, index) => (text.trim() ? index : -1))
-        .filter((index): index is number => index >= 0)
-      const requestTexts = requestIndices.map((index) => preparedTexts[index])
+      // Group on the sanitized text so an empty cue always ends a group instead
+      // of silently joining one, then send one request line per sentence.
+      const groups = groupSentenceCues(
+        segments.map((segment, index) => ({
+          ...segment,
+          text: preparedTexts[index],
+        })),
+      )
+        .map((group) => group.filter((index) => preparedTexts[index].trim()))
+        .filter((group) => group.length > 0)
+      const requestTexts = groups.map((group) =>
+        joinCueTexts(
+          group.map((index) => preparedTexts[index].trim()),
+          sourceLang,
+        ),
+      )
+      const requestBudgets = groups.map((group) =>
+        groupCharBudget(group, segments, targetLang),
+      )
       const selectedProvider = selectedTranslateProvider()
       const primaryProvider =
         selectedProvider === "auto" &&
@@ -268,6 +317,7 @@ export function createTranslationService(options: TranslationServiceOptions) {
           ? "gemini"
           : selectedProvider
       let translatedTexts = preparedTexts.map(() => "")
+      const translatedCovered = preparedTexts.map(() => false)
       if (requestTexts.length) {
         let apiTranslations: string[]
         try {
@@ -277,6 +327,7 @@ export function createTranslationService(options: TranslationServiceOptions) {
             targetLang,
             controller.signal,
             primaryProvider,
+            requestBudgets,
           )
       } catch (primaryError) {
         if (controller.signal.aborted) throw primaryError
@@ -302,6 +353,7 @@ export function createTranslationService(options: TranslationServiceOptions) {
               targetLang,
               controller.signal,
               fallbackProvider,
+              requestBudgets,
             )
           } catch (fallbackError) {
             if (controller.signal.aborted) throw fallbackError
@@ -315,28 +367,55 @@ export function createTranslationService(options: TranslationServiceOptions) {
           throw new Error(apiFailureMessage(primaryError))
         }
         }
-        requestIndices.forEach((originalIndex, apiIndex) => {
-          translatedTexts[originalIndex] = apiTranslations[apiIndex] ?? ""
+        // One request line covered a whole sentence, so hand each cue back the
+        // share of the translation matching what it carried in the source.
+        groups.forEach((group, groupIndex) => {
+          const groupText = String(apiTranslations[groupIndex] ?? "")
+          const parts = distributeTranslatedText(
+            groupText,
+            group.map((index) => preparedTexts[index]),
+          )
+          group.forEach((cueIndex, memberIndex) => {
+            translatedTexts[cueIndex] = parts[memberIndex] ?? ""
+          })
+          // A member can legitimately end up empty when its share of the
+          // sentence landed in a sibling cue. Mark the group translated so that
+          // cue stays blank instead of falling back to untranslated source text.
+          if (groupText.trim()) {
+            for (const cueIndex of group) translatedCovered[cueIndex] = true
+          }
         })
       }
 
       controller.signal.throwIfAborted()
-      const translatedSegments = segments.map((segment, index) => ({
-        ...segment,
-        text:
-          cleanTranslationArtifacts(
-            enforceBracketedSoundCues(
-              translatedTexts[index] || preparedTexts[index],
-              segment.text,
-              targetLang,
-            ),
-            preparedTexts[index],
-          ) || preparedTexts[index],
-        words: undefined,
-      }))
-      return reflowTranslatedSegments(segments, translatedSegments, {
+      const translatedSegments = segments.map((segment, index) => {
+        // Only fall back to source text when the API gave this cue nothing at
+        // all. A covered cue that came back empty had its words placed in a
+        // sibling cue of the same sentence, so source text there would duplicate
+        // meaning and reintroduce untranslated lines.
+        const fallback = translatedCovered[index] ? "" : preparedTexts[index]
+        return {
+          ...segment,
+          text:
+            cleanTranslationArtifacts(
+              enforceBracketedSoundCues(
+                translatedTexts[index] || fallback,
+                segment.text,
+                targetLang,
+              ),
+              preparedTexts[index],
+            ) || fallback,
+          words: undefined,
+        }
+      })
+      const reflowed = reflowTranslatedSegments(segments, translatedSegments, {
         targetLang,
       })
+      // Callers that map results back onto a selection need the 1:1 array;
+      // full-track translation prefers readable cues over a stable cue count.
+      return requestOptions.splitLongCues === false
+        ? reflowed
+        : splitOversizedCues(reflowed, { targetLang })
     } finally {
       requestOptions.signal?.removeEventListener("abort", abortFromCaller)
       activeAbortControllers.delete(controller)

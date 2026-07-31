@@ -14,6 +14,14 @@ export type ProxyPayload = {
   exp: number;
 };
 
+export type VerifyProxyTokenOptions = {
+  /**
+   * Local yt-dlp stores downloads in a guarded temporary directory. Workers
+   * must never enable this because they only proxy HTTP(S) Cobalt URLs.
+   */
+  allowFileProtocol?: boolean;
+};
+
 function toBase64Url(bytes: ArrayBuffer | Uint8Array): string {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let binary = "";
@@ -53,6 +61,7 @@ export async function signProxyPayload(
 export async function verifyProxyToken(
   token: string,
   secret: string,
+  options: VerifyProxyTokenOptions = {},
 ): Promise<ProxyPayload | null> {
   const [bodyB64, sigB64] = token.split(".");
   if (!bodyB64 || !sigB64) return null;
@@ -80,13 +89,11 @@ export async function verifyProxyToken(
     if (payload.exp * 1000 < Date.now()) return null;
 
     const target = new URL(payload.u);
-    // http(s) for Cobalt tunnels; file: for local yt-dlp temp downloads only
-    // (proxy handlers must still enforce path allowlists for file URLs).
-    if (
-      target.protocol !== "http:" &&
-      target.protocol !== "https:" &&
-      target.protocol !== "file:"
-    ) {
+    const allowedProtocol =
+      target.protocol === "http:" ||
+      target.protocol === "https:" ||
+      (options.allowFileProtocol === true && target.protocol === "file:");
+    if (!allowedProtocol) {
       return null;
     }
 
@@ -96,15 +103,28 @@ export async function verifyProxyToken(
   }
 }
 
+export class MissingProxySecretError extends Error {
+  constructor() {
+    super(
+      "MEDIA_PROXY_SECRET is not configured. Set it with `wrangler secret put MEDIA_PROXY_SECRET`.",
+    );
+    this.name = "MissingProxySecretError";
+  }
+}
+
+/** Minimum entropy we are willing to sign proxy tokens with. */
+const MIN_SECRET_LENGTH = 32;
+
+/**
+ * The signing secret for media proxy tokens. This is the only thing standing
+ * between the Worker and being an open proxy, so it is required and has no
+ * fallback: deriving it from `COBALT_API_URL` (a public value) or a literal
+ * baked into the repo would let anyone mint valid tokens.
+ */
 export function defaultProxySecret(env: {
   MEDIA_PROXY_SECRET?: string;
-  COBALT_API_KEY?: string;
-  COBALT_API_URL?: string;
 }): string {
-  return (
-    env.MEDIA_PROXY_SECRET ||
-    env.COBALT_API_KEY ||
-    env.COBALT_API_URL ||
-    "dev-insecure-media-proxy-secret"
-  );
+  const secret = String(env.MEDIA_PROXY_SECRET || "").trim();
+  if (secret.length < MIN_SECRET_LENGTH) throw new MissingProxySecretError();
+  return secret;
 }

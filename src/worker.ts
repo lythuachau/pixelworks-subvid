@@ -8,6 +8,10 @@ import {
   requireApiAdmin,
   withStoredApiConfig,
 } from "@/server/apiAdmin.ts"
+import type { RateLimitBinding } from "@/server/rateLimit.ts"
+
+// Durable Object backing the login lockout and proxy rate limits.
+export { RateLimiter } from "@/server/rateLimiterDo.ts"
 
 const LOCALES = Object.keys(languages)
 const LOCALE_COOKIE = "locale"
@@ -35,6 +39,7 @@ type WorkerEnv = {
     get(key: string, type?: "json"): Promise<unknown>
     put(key: string, value: string): Promise<void>
   }
+  RATE_LIMITER?: RateLimitBinding
   [key: string]: unknown
 }
 

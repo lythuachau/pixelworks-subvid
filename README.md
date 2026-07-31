@@ -130,6 +130,18 @@ pnpm deploy
 
 You need a [Cloudflare account](https://dash.cloudflare.com) and Wrangler authenticated (`wrangler login`).
 
+### Rate limiting (Durable Object)
+
+Login attempts and the media/speech APIs are rate limited through a `RATE_LIMITER`
+Durable Object (`src/server/rateLimiterDo.ts`), declared in `wrangler.jsonc` with a
+`new_sqlite_classes` migration — free-plan eligible. KV is **not** used here: it is
+eventually consistent, so an attacker can race parallel requests past a KV-backed
+lockout. The first `pnpm deploy` after adding the binding applies migration `v1`.
+
+If the binding is missing (e.g. a stripped-down environment) the limiter degrades to
+per-isolate memory instead of failing the deploy — weaker, but never fail-open in a
+way that breaks the site.
+
 ## Link import (Douyin · TikTok · YouTube)
 
 The upload stage accepts a pasteable share link in addition to local files. Flow:
@@ -146,12 +158,15 @@ Copy `env.example` and set secrets/vars on the Worker (dashboard or Wrangler):
 | --- | --- | --- |
 | `COBALT_API_URL` | yes (for links) | Base URL of your Cobalt API (no trailing slash) |
 | `COBALT_API_KEY` | no | `Authorization: Api-Key …` if the instance requires it |
-| `MEDIA_PROXY_SECRET` | recommended | HMAC secret for proxy download tokens |
+| `MEDIA_PROXY_SECRET` | **yes** | HMAC secret for proxy download tokens, ≥ 32 chars. Without it `/api/media/*` returns `503 proxy_unavailable` — there is no fallback secret |
 | `MEDIA_MAX_BYTES` | no | Max import size (default `160000000` ≈ 160 MB) |
 
 ```sh
 # example (non-secret)
 npx wrangler secret put COBALT_API_KEY
+
+# required — generate a strong value first
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 npx wrangler secret put MEDIA_PROXY_SECRET
 ```
 

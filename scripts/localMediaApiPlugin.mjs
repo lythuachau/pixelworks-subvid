@@ -155,9 +155,11 @@ export function localMediaApiPlugin() {
           path === "/api/translate" ||
           path === "/api/translate/status" ||
           path === "/api/translate/models" ||
-          path === "/api/translate/gemini/models";
+          path === "/api/translate/gemini/models" ||
+          path === "/api/translate/cue-plan";
         const isSpeech = path === "/api/speech/transcribe";
-        if (!isMedia && !isTranslate && !isSpeech) {
+        const isCuePlan = path === "/api/cue-plan";
+        if (!isMedia && !isTranslate && !isSpeech && !isCuePlan) {
           next();
           return;
         }
@@ -166,12 +168,24 @@ export function localMediaApiPlugin() {
           /** @type {Response | null} */
           let response = null;
 
-          if (isSpeech) {
+          if (isCuePlan) {
+            const body = await readBody(req);
+            const request = toWebRequest(req, body);
+            const cuePlan = await server.ssrLoadModule(
+              "/scripts/localCuePlan.mjs",
+            );
+            response = await cuePlan.handleLocalCuePlan(request);
+          } else if (isSpeech) {
             const env = mediaEnvFromProcess();
             const body = await readBody(req);
             const request = toWebRequest(req, body);
             const speech = await server.ssrLoadModule("/src/server/speechApi.ts");
-            response = await speech.handleSpeechApi(request, env);
+            response = await speech.handleSpeechApi(request, {
+              ...env,
+              // This Vite service listens on loopback only. Public requests
+              // reach it through Caddy's site-wide forward_auth gate.
+              TRUSTED_LOCAL_REQUEST: true,
+            });
           } else if (isTranslate) {
             const body = await readBody(req);
             const request = toWebRequest(req, body);
@@ -219,6 +233,14 @@ export function localMediaApiPlugin() {
               );
             } else if (path === "/api/translate/models") {
               response = await custom.handleCustomTranslateModels(request);
+            } else if (path === "/api/translate/cue-plan") {
+              const translateApi = await server.ssrLoadModule(
+                "/src/server/translateApi.ts",
+              );
+              response = await translateApi.handleTranslateApi(
+                request,
+                mediaEnvFromProcess(),
+              );
             } else {
               // Route by provider in body (auto|gemini|custom)
               let provider = "auto";

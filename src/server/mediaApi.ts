@@ -9,15 +9,24 @@ import {
 } from "@/server/douyinResolve.ts";
 import {
   defaultProxySecret,
+  MissingProxySecretError,
   signProxyPayload,
   verifyProxyToken,
 } from "@/server/mediaToken.ts";
+import { cobaltHostname, isAllowedMediaHost } from "@/server/netGuard.ts";
+import {
+  clientIp,
+  recordRateLimitFailure,
+  type RateLimitBinding,
+} from "@/server/rateLimit.ts";
 
 export type MediaEnv = {
   COBALT_API_URL?: string;
   COBALT_API_KEY?: string;
   MEDIA_PROXY_SECRET?: string;
   MEDIA_MAX_BYTES?: string;
+  RATE_LIMITER?: RateLimitBinding;
+  [key: string]: unknown;
 };
 
 // Allow common 720p Douyin clips while retaining a bounded proxy stream.
@@ -25,10 +34,9 @@ const DEFAULT_MAX_BYTES = 160_000_000;
 const PROXY_TTL_SECONDS = 15 * 60;
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 20;
+/** Redirect hops the proxy will follow, re-checking the allowlist each time. */
+const MAX_REDIRECTS = 5;
 const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"')\]]+/gi;
-
-type RateBucket = { count: number; resetAt: number };
-const rateBuckets = new Map<string, RateBucket>();
 
 type CobaltTunnelResponse = {
   status: "tunnel" | "redirect";
@@ -71,41 +79,43 @@ function json(
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
       ...extraHeaders,
     },
   });
 }
 
-function clientIp(request: Request): string {
-  return (
-    request.headers.get("CF-Connecting-IP") ||
-    request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
-    "unknown"
+async function rateLimit(
+  request: Request,
+  env: MediaEnv,
+): Promise<Response | null> {
+  const decision = await recordRateLimitFailure(
+    env,
+    `media:${clientIp(request)}`,
+    { limit: RATE_MAX, windowMs: RATE_WINDOW_MS },
+  );
+  if (!decision.blocked) return null;
+  return json(
+    {
+      ok: false,
+      error: "rate_limited",
+      message: "Too many import requests. Try again shortly.",
+    },
+    429,
+    { "Retry-After": String(decision.retryAfter) },
   );
 }
 
-function rateLimit(request: Request): Response | null {
-  const ip = clientIp(request);
-  const now = Date.now();
-  const bucket = rateBuckets.get(ip);
-  if (!bucket || bucket.resetAt <= now) {
-    rateBuckets.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
-    return null;
-  }
-  bucket.count += 1;
-  if (bucket.count > RATE_MAX) {
-    const retry = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
-    return json(
-      {
-        ok: false,
-        error: "rate_limited",
-        message: "Too many import requests. Try again shortly.",
-      },
-      429,
-      { "Retry-After": String(retry) },
-    );
-  }
-  return null;
+function proxySecretUnavailable(): Response {
+  return json(
+    {
+      ok: false,
+      error: "not_configured",
+      message:
+        "Media proxy is not configured. Set MEDIA_PROXY_SECRET on the server.",
+    },
+    503,
+  );
 }
 
 function maxBytes(env: MediaEnv): number {
@@ -210,8 +220,16 @@ export async function handleMediaResolve(
     return json({ ok: false, error: "method_not_allowed" }, 405);
   }
 
-  const limited = rateLimit(request);
+  const limited = await rateLimit(request, env);
   if (limited) return limited;
+
+  // Fail fast rather than resolving the link and then failing to sign it.
+  try {
+    defaultProxySecret(env);
+  } catch (error) {
+    if (error instanceof MissingProxySecretError) return proxySecretUnavailable();
+    throw error;
+  }
 
   let body: { url?: string };
   try {
@@ -411,6 +429,59 @@ export async function handleMediaResolve(
   }
 }
 
+class BlockedTargetError extends Error {}
+
+/**
+ * Fetch `target`, following redirects by hand so the allowlist is re-checked
+ * on every hop. With `redirect: "follow"` an allowed CDN could 302 the Worker
+ * to any host on the internet, which is what made this an open proxy.
+ */
+async function fetchAllowedMedia(
+  target: string,
+  request: Request,
+  env: MediaEnv,
+): Promise<Response> {
+  const cobaltHost = cobaltHostname(env.COBALT_API_URL);
+  let current = target;
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    const parsed = new URL(current);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw new BlockedTargetError(parsed.protocol);
+    }
+    if (!isAllowedMediaHost(parsed.hostname, cobaltHost)) {
+      throw new BlockedTargetError(parsed.hostname);
+    }
+
+    const isDouyinCdn =
+      /snssdk\.com|douyin|byteicdn|tiktokcdn|ibytedtos/i.test(parsed.hostname);
+    const response = await fetch(current, {
+      method: request.method,
+      headers: isDouyinCdn
+        ? { ...DOUYIN_FETCH_HEADERS }
+        : {
+            // Some CDNs are picky; keep headers minimal.
+            Accept: "*/*",
+            "User-Agent":
+              request.headers.get("User-Agent") || "subvid-media-proxy/1.0",
+          },
+      redirect: "manual",
+    });
+
+    const location =
+      response.status >= 300 && response.status < 400
+        ? response.headers.get("Location")
+        : null;
+    if (!location) return response;
+
+    // Drain the redirect body so the connection is not left dangling.
+    await response.body?.cancel().catch(() => {});
+    current = new URL(location, current).toString();
+  }
+
+  throw new BlockedTargetError("too_many_redirects");
+}
+
 export async function handleMediaProxy(
   request: Request,
   env: MediaEnv,
@@ -419,12 +490,18 @@ export async function handleMediaProxy(
     return json({ ok: false, error: "method_not_allowed" }, 405);
   }
 
-  const limited = rateLimit(request);
+  const limited = await rateLimit(request, env);
   if (limited) return limited;
 
   const url = new URL(request.url);
   const token = url.searchParams.get("t") || "";
-  const secret = defaultProxySecret(env);
+  let secret: string;
+  try {
+    secret = defaultProxySecret(env);
+  } catch (error) {
+    if (error instanceof MissingProxySecretError) return proxySecretUnavailable();
+    throw error;
+  }
   const payload = await verifyProxyToken(token, secret);
   if (!payload) {
     return json(
@@ -435,22 +512,18 @@ export async function handleMediaProxy(
 
   let upstream: Response;
   try {
-    const targetHost = new URL(payload.u).hostname;
-    const isDouyinCdn =
-      /snssdk\.com|douyin|byteicdn|tiktokcdn|ibytedtos/i.test(targetHost);
-    upstream = await fetch(payload.u, {
-      method: request.method,
-      headers: isDouyinCdn
-        ? { ...DOUYIN_FETCH_HEADERS }
-        : {
-            // Some CDNs are picky; keep headers minimal.
-            Accept: "*/*",
-            "User-Agent":
-              request.headers.get("User-Agent") || "subvid-media-proxy/1.0",
-          },
-      redirect: "follow",
-    });
-  } catch {
+    upstream = await fetchAllowedMedia(payload.u, request, env);
+  } catch (error) {
+    if (error instanceof BlockedTargetError) {
+      return json(
+        {
+          ok: false,
+          error: "forbidden_target",
+          message: "This media host is not allowed.",
+        },
+        403,
+      );
+    }
     return json(
       { ok: false, error: "failed", message: "Upstream media fetch failed." },
       502,
@@ -523,6 +596,7 @@ export async function handleMediaProxy(
   const headers = new Headers({
     "Content-Type": contentType,
     "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
     "Content-Disposition": `attachment; filename="${filename.replace(/"/g, "")}"`,
   });
   if (contentLengthHeader) {

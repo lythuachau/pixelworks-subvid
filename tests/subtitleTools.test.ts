@@ -16,7 +16,10 @@ import {
   isSuspiciousContextTranslation,
   translateWithContextStrategy,
 } from "../scripts/localContextTranslate.mjs"
-import { normalizeCustomBaseUrl } from "../scripts/localCustomTranslate.mjs"
+import {
+  normalizeCustomBaseUrl,
+  resolveProtocol as resolveLocalCustomProtocol,
+} from "../scripts/localCustomTranslate.mjs"
 import {
   buildAss,
   buildSubtitleFile,
@@ -25,32 +28,23 @@ import {
   createStoredZip,
 } from "../src/scripts/subtitleFormats.ts"
 import { sanitizeSubtitleSourceText } from "../src/scripts/subtitleArtifacts.ts"
-import { reflowTranslatedSegments } from "../src/scripts/subtitles.ts"
-import { isDevtoolsShortcut } from "../src/scripts/devtoolsGuard.ts"
+import {
+  distributeTranslatedText,
+  groupSentenceCues,
+  reflowTranslatedSegments,
+  splitOversizedCues,
+  wrapSubtitleText,
+} from "../src/scripts/subtitles.ts"
 import {
   handleTranslateApi,
   parseCustomApiResponse,
+  promptFor,
   resolveCustomProtocol,
 } from "../src/server/translateApi.ts"
 
-test("developer-tool shortcuts are blocked without affecting ordinary keys", () => {
-  const shortcut = (overrides: Partial<Parameters<typeof isDevtoolsShortcut>[0]>) =>
-    isDevtoolsShortcut({
-      key: "",
-      ctrlKey: false,
-      metaKey: false,
-      shiftKey: false,
-      altKey: false,
-      ...overrides,
-    })
-
-  assert.equal(shortcut({ key: "F12" }), true)
-  assert.equal(shortcut({ key: "I", ctrlKey: true, shiftKey: true }), true)
-  assert.equal(shortcut({ key: "j", metaKey: true, altKey: true }), true)
-  assert.equal(shortcut({ key: "u", ctrlKey: true }), true)
-  assert.equal(shortcut({ key: "c", ctrlKey: true }), false)
-  assert.equal(shortcut({ key: "F5" }), false)
-})
+/** A real zh→vi cue: 27 Chinese characters expand to 118 Vietnamese ones. */
+const LONG_VI =
+  "Ngươi đừng thấy hắn tuổi còn nhỏ, khinh công và thân pháp của hắn đều là mạnh nhất trong toàn bộ môn phái của chúng ta"
 
 test("subtitle source sanitizer removes stray brackets but preserves sound cues", () => {
   assert.equal(sanitizeSubtitleSourceText("["), "")
@@ -65,6 +59,97 @@ test("reflow does not restore a sanitized artifact from the source cue", () => {
     [{ start: 0, end: 0.5, text: "" }],
   )
   assert.equal(result[0].text, "")
+})
+
+test("overflowing text wraps into balanced lines instead of one long dump", () => {
+  const lengths = wrapSubtitleText(LONG_VI, 42, 2)
+    .split("\n")
+    .map((line) => line.length)
+  assert.equal(lengths.length, 2)
+  // The old wrapper filled line 1 to the limit and dumped the remainder on line
+  // 2 (39/78). Both lines must now carry a comparable share.
+  const longestWord = LONG_VI.split(" ").reduce((max, word) => Math.max(max, word.length), 0)
+  assert.ok(
+    Math.max(...lengths) - Math.min(...lengths) <= longestWord,
+    `unbalanced lines: ${JSON.stringify(lengths)}`,
+  )
+  assert.equal(lengths.reduce((sum, value) => sum + value, 0) + 1, LONG_VI.length)
+  // Short text is never touched.
+  assert.equal(wrapSubtitleText("Thật sao?", 42, 2), "Thật sao?")
+})
+
+test("splitting an oversized cue tiles the original time span exactly", () => {
+  const source = { start: 4, end: 8.2, text: LONG_VI }
+  const parts = splitOversizedCues([source], { targetLang: "vi" })
+  assert.ok(parts.length > 1, "an over-long cue should be split")
+  // The source track is the only timing authority: the outer edges must stay
+  // bit-identical and the parts must cover the span without gaps or overlap.
+  assert.equal(parts[0].start, source.start)
+  assert.equal(parts[parts.length - 1].end, source.end)
+  parts.forEach((part, index) => {
+    if (index > 0) assert.equal(part.start, parts[index - 1].end)
+    assert.ok(part.end - part.start >= 0.75, `part ${index} is shorter than the minimum cue`)
+    assert.ok(part.text.trim(), `part ${index} is empty`)
+    assert.equal(part.words, undefined)
+  })
+  // No text is invented or lost by the split.
+  assert.equal(
+    parts.map((part) => part.text.replace(/\s+/g, "")).join(""),
+    LONG_VI.replace(/\s+/g, ""),
+  )
+})
+
+test("cues that already fit, or are too short to divide, are left alone", () => {
+  const short = [{ start: 0, end: 1.2, text: "Thật sao?" }]
+  assert.deepEqual(splitOversizedCues(short, { targetLang: "vi" }), short)
+  // Long text but no room for two readable cues ⇒ keep one cue.
+  const cramped = [{ start: 0, end: 1.0, text: LONG_VI }]
+  assert.equal(splitOversizedCues(cramped, { targetLang: "vi" }).length, 1)
+})
+
+test("sentence grouping joins continuing cues and stops at real boundaries", () => {
+  const groups = groupSentenceCues([
+    { start: 0, end: 1.2, text: "你别看他年纪小" },
+    { start: 1.25, end: 2.4, text: "轻功和身法都是最厉害的" },
+    { start: 2.45, end: 3.4, text: "真的吗？" },
+    { start: 3.5, end: 4.4, text: "我不信" },
+    { start: 9.0, end: 10.0, text: "后来呢" },
+  ])
+  // Cues 0-2 run on without sentence-ending punctuation; cue 3 starts a new
+  // group because cue 2 ends with "？", and cue 4 is 4.6s later.
+  assert.deepEqual(groups, [[0, 1, 2], [3], [4]])
+  // Every cue appears exactly once, in order — the scatter-back depends on it.
+  assert.deepEqual(groups.flat(), [0, 1, 2, 3, 4])
+})
+
+test("sentence grouping never merges across an empty cue", () => {
+  assert.deepEqual(
+    groupSentenceCues([
+      { start: 0, end: 1, text: "你别看他" },
+      { start: 1.05, end: 2, text: "" },
+      { start: 2.05, end: 3, text: "年纪小" },
+    ]),
+    [[0], [1], [2]],
+  )
+})
+
+test("a sentence translation is redistributed across the cues that carried it", () => {
+  const parts = distributeTranslatedText(
+    "Ngươi đừng thấy hắn tuổi còn nhỏ, khinh công và thân pháp đều là mạnh nhất",
+    ["你别看他年纪小", "轻功和身法都是最厉害的"],
+  )
+  assert.equal(parts.length, 2)
+  assert.ok(parts[0].trim() && parts[1].trim())
+  // Split at the clause boundary, and no word duplicated or dropped.
+  assert.ok(parts[0].endsWith(","), `expected a clause break, got ${JSON.stringify(parts[0])}`)
+  assert.equal(
+    `${parts[0]} ${parts[1]}`,
+    "Ngươi đừng thấy hắn tuổi còn nhỏ, khinh công và thân pháp đều là mạnh nhất",
+  )
+  // Always exactly one entry per source cue, even when there is too little text
+  // to go around.
+  assert.deepEqual(distributeTranslatedText("Vâng", ["嗯", "好的"]), ["Vâng", ""])
+  assert.deepEqual(distributeTranslatedText("", ["嗯", "好的"]), ["", ""])
 })
 
 test("quality analysis reports timing, content and readability issues", () => {
@@ -172,6 +257,59 @@ test("FreeModel endpoints select their documented wire protocol", () => {
   )
 })
 
+test("auto protocol follows the endpoint, not the model name", () => {
+  // Regression: picking "anthropic" from a claude-* model name pointed
+  // Anthropic-shaped requests at OpenAI-only gateways, so every Claude model
+  // failed on api.leeh.dev while GPT models worked.
+  assert.equal(
+    resolveCustomProtocol("auto", "https://api.leeh.dev", "claude-sonnet-4-6"),
+    "openai",
+  )
+  assert.equal(
+    resolveCustomProtocol("auto", "https://api.leeh.dev/v1", "gpt-4o-mini"),
+    "openai",
+  )
+  // Native Anthropic still gets its own wire protocol without being asked.
+  assert.equal(
+    resolveCustomProtocol("auto", "https://api.anthropic.com", "claude-sonnet-4-6"),
+    "anthropic",
+  )
+})
+
+test("local custom translator also routes Claude IDs by gateway protocol", async () => {
+  assert.equal(
+    await resolveLocalCustomProtocol({
+      protocol: "auto",
+      baseUrl: "https://api.leeh.dev",
+      apiKey: "test",
+      model: "claude-opus-4-6",
+    }),
+    "openai",
+  )
+  assert.equal(
+    await resolveLocalCustomProtocol({
+      protocol: "auto",
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "test",
+      model: "claude-opus-4-6",
+    }),
+    "anthropic",
+  )
+})
+
+test("per-line character budgets reach the model prompt", () => {
+  const prompt = promptFor(["你好", "真的吗"], "zh", "vi", [40, 24])
+  assert.match(prompt, /^1\. \(max 40\) 你好$/m)
+  assert.match(prompt, /^2\. \(max 24\) 真的吗$/m)
+  assert.match(prompt, /maximum characters allowed/)
+  // A mismatched budget array must be ignored rather than shifted onto the
+  // wrong lines.
+  const unbudgeted = promptFor(["你好", "真的吗"], "zh", "vi", [40])
+  assert.match(unbudgeted, /^1\. 你好$/m)
+  assert.doesNotMatch(unbudgeted, /max/)
+  assert.doesNotMatch(promptFor(["你好"], "zh", "vi"), /max/)
+})
+
 test("custom API parser reads Anthropic and OpenAI Responses SSE", () => {
   const anthropic = [
     "event: content_block_delta",
@@ -250,7 +388,7 @@ test("translation proxy sends OpenAI Responses request and parses its stream", a
           strategy: "probe",
         }),
       }),
-      {},
+      { ALLOW_PRIVATE_TRANSLATE_ENDPOINT: "1" },
     )
     assert.ok(response)
     const payload = await response.json() as any
@@ -260,6 +398,63 @@ test("translation proxy sends OpenAI Responses request and parses its stream", a
     assert.equal(requestedBody.store, false)
     assert.deepEqual(payload.translations, ["Xin chào"])
     assert.equal(payload.engine, "custom:responses")
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+  }
+})
+
+test("anthropic requests to a gateway keep the bearer token and drop length hints", async () => {
+  let headers: Record<string, string | string[] | undefined> = {}
+  let requestedPath = ""
+  const server = createServer((request, response) => {
+    let raw = ""
+    request.setEncoding("utf8")
+    request.on("data", (chunk) => { raw += chunk })
+    request.on("end", () => {
+      headers = request.headers
+      requestedPath = request.url || ""
+      response.writeHead(200, { "Content-Type": "application/json" })
+      // Echo the length marker back, the way models sometimes do.
+      response.end(
+        JSON.stringify({ content: [{ type: "text", text: "1. (max 40) Xin chào" }] }),
+      )
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address === "object")
+    const response = await handleTranslateApi(
+      new Request("http://subvid.local/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "custom",
+          baseUrl: `http://127.0.0.1:${address.port}`,
+          apiKey: "test-key",
+          model: "claude-sonnet-4-6",
+          protocol: "anthropic",
+          source: "zh",
+          target: "vi",
+          texts: ["你好"],
+          budgets: [40],
+          strategy: "probe",
+        }),
+      }),
+      { ALLOW_PRIVATE_TRANSLATE_ENDPOINT: "1" },
+    )
+    assert.ok(response)
+    const payload = await response.json() as any
+    assert.equal(response.status, 200)
+    assert.equal(requestedPath, "/v1/messages")
+    // Gateways that expose /v1/messages behind an OpenAI-style auth wall read
+    // Authorization and never look at x-api-key; only native Anthropic rejects
+    // a stray bearer token.
+    assert.equal(headers.authorization, "Bearer test-key")
+    assert.equal(headers["x-api-key"], "test-key")
+    assert.deepEqual(payload.translations, ["Xin chào"])
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
@@ -292,7 +487,7 @@ test("translation proxy preserves upstream status and protocol diagnostics", asy
           strategy: "probe",
         }),
       }),
-      {},
+      { ALLOW_PRIVATE_TRANSLATE_ENDPOINT: "1" },
     )
     assert.ok(response)
     const payload = await response.json() as any

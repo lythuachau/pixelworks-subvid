@@ -195,7 +195,7 @@ async function sleep(ms) {
   await new Promise((r) => setTimeout(r, ms));
 }
 
-async function callGemini(model, key, prompt, attempt = 1) {
+async function callGemini(model, key, prompt, attempt = 1, options = {}) {
   const url = `${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
   const res = await fetch(url, {
     method: "POST",
@@ -204,8 +204,11 @@ async function callGemini(model, key, prompt, attempt = 1) {
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 4096,
+        maxOutputTokens: Number(options.maxOutputTokens) || 4096,
         responseMimeType: "application/json",
+        ...(options.responseSchema
+          ? { responseSchema: options.responseSchema }
+          : {}),
       },
     }),
   });
@@ -217,7 +220,7 @@ async function callGemini(model, key, prompt, attempt = 1) {
       `[gemini-translate] rate limited, retry in ${wait}ms (attempt ${attempt})`,
     );
     await sleep(wait);
-    return callGemini(model, key, prompt, attempt + 1);
+    return callGemini(model, key, prompt, attempt + 1, options);
   }
 
   if (!res.ok) {
@@ -236,6 +239,20 @@ async function callGemini(model, key, prompt, attempt = 1) {
     throw new Error("Gemini returned empty translation");
   }
   return text;
+}
+
+export async function generateStructuredWithGoogle(prompt, options = {}) {
+  const key = getApiKey();
+  if (!key) {
+    throw new Error(
+      "Gemini API key missing. Set GEMINI_API_KEY (or GOOGLE_API_KEY) in .env",
+    );
+  }
+  const model = getModel();
+  return {
+    model,
+    text: await callGemini(model, key, String(prompt || ""), 1, options),
+  };
 }
 
 function containsCjk(text) {

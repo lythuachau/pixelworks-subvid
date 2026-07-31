@@ -35,14 +35,6 @@ const i18n = clientStrings(Astro.currentLocale)
 <QualityModal />
 <CompareModal />
 
-<div
-  id="devtools-guard-toast"
-  class="devtools-guard-toast"
-  role="status"
-  aria-live="polite"
-  hidden
-></div>
-
 <script is:inline set:html={`window.__I18N__=${JSON.stringify(i18n)}`} />
 <script>
   import "@/scripts/app.ts"

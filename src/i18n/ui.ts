@@ -222,7 +222,6 @@ export const ui = {
       translateTestOk: "API hoạt động",
       translateTestFailed: "API lỗi",
       translateModelPick: "Chọn mô hình…",
-      devtoolsBlocked: "Công cụ dành cho nhà phát triển đã bị vô hiệu hóa trên giao diện này.",
       downloads: {
         ffmpeg: "Lõi FFmpeg WASM",
         whisper: "Mô hình Whisper",
@@ -638,7 +637,6 @@ export const ui = {
       translateTestOk: "API funcionando",
       translateTestFailed: "Error de API",
       translateModelPick: "Elige un modelo…",
-      devtoolsBlocked: "Las herramientas para desarrolladores están desactivadas en esta interfaz.",
       downloads: {
         ffmpeg: "Núcleo WASM de FFmpeg",
         whisper: "Modelo Whisper",

@@ -1,3 +1,16 @@
+import {
+  assertPublicHttpsEndpoint,
+  BlockedEndpointError,
+} from "./netGuard.ts"
+import {
+  clearRateLimit,
+  clientIp,
+  isRateLimited,
+  recordRateLimitFailure,
+  type RateLimitBinding,
+  type RateLimitOptions,
+} from "./rateLimit.ts"
+
 type ApiConfigStore = {
   get(key: string, type?: "json"): Promise<unknown>
   put(key: string, value: string): Promise<void>
@@ -8,6 +21,7 @@ export type ApiAdminEnv = {
   SUBVID_API_ADMIN_PASSWORD_HASH?: string
   SUBVID_API_ADMIN_SESSION_SECRET?: string
   API_CONFIG?: ApiConfigStore
+  RATE_LIMITER?: RateLimitBinding
   CUSTOM_TRANSLATE_BASE_URL?: string
   CUSTOM_TRANSLATE_API_KEY?: string
   CUSTOM_TRANSLATE_MODEL?: string
@@ -37,6 +51,16 @@ type StoredApiConfig = {
 const CONFIG_KEY = "translation-api-config-v1"
 const COOKIE_NAME = "subvid_api_admin"
 const SESSION_SECONDS = 12 * 60 * 60
+
+/**
+ * Login lockout. Counted per source IP *and* per submitted username so a
+ * botnet spraying one password cannot slip past a purely per-IP limit.
+ */
+const LOGIN_LIMIT: RateLimitOptions = {
+  limit: 5,
+  windowMs: 15 * 60_000,
+  lockoutMs: 15 * 60_000,
+}
 
 const encoder = new TextEncoder()
 
@@ -290,12 +314,32 @@ export async function requireApiAdmin(request: Request, env: ApiAdminEnv) {
   return null
 }
 
+/**
+ * HTTPS-only *and* public-internet-only: an admin must not be able to point
+ * the translation endpoint at loopback, RFC1918 or link-local metadata.
+ */
 function normalizeEndpoint(value: unknown) {
-  const endpoint = String(value || "").trim().replace(/\/+$/, "")
-  if (!endpoint) return ""
-  const parsed = new URL(endpoint)
-  if (parsed.protocol !== "https:") throw new Error("Endpoint phải dùng HTTPS.")
-  return endpoint.replace(/\/v1$/i, "")
+  return assertPublicHttpsEndpoint(value)
+}
+
+function loginRateKeys(request: Request, username: string) {
+  return [
+    `api-admin-login:ip:${clientIp(request)}`,
+    `api-admin-login:user:${username.toLowerCase()}`,
+  ]
+}
+
+function lockedOutResponse(retryAfter: number) {
+  const minutes = Math.max(1, Math.ceil(retryAfter / 60))
+  return json(
+    {
+      ok: false,
+      error: "rate_limited",
+      message: `Quá nhiều lần đăng nhập sai. Vui lòng thử lại sau khoảng ${minutes} phút.`,
+    },
+    429,
+    { "Retry-After": String(retryAfter) },
+  )
 }
 
 export async function handleApiAdmin(request: Request, env: ApiAdminEnv) {
@@ -329,6 +373,14 @@ export async function handleApiAdmin(request: Request, env: ApiAdminEnv) {
     }
     const username = String(body.username || "").trim()
     const password = String(body.password || "")
+    const rateKeys = loginRateKeys(request, username)
+
+    const existing = await Promise.all(
+      rateKeys.map((key) => isRateLimited(env, key, LOGIN_LIMIT)),
+    )
+    const blocked = existing.find((decision) => decision.blocked)
+    if (blocked) return lockedOutResponse(blocked.retryAfter)
+
     const expectedUser = String(env.SUBVID_API_ADMIN_USER || "").trim()
     const userOk = safeEqual(username, expectedUser)
     const passwordOk = await verifyPassword(
@@ -336,6 +388,11 @@ export async function handleApiAdmin(request: Request, env: ApiAdminEnv) {
       String(env.SUBVID_API_ADMIN_PASSWORD_HASH || "").trim(),
     )
     if (!(userOk && passwordOk)) {
+      const recorded = await Promise.all(
+        rateKeys.map((key) => recordRateLimitFailure(env, key, LOGIN_LIMIT)),
+      )
+      const tripped = recorded.find((decision) => decision.blocked)
+      if (tripped) return lockedOutResponse(tripped.retryAfter)
       return json(
         {
           ok: false,
@@ -345,6 +402,8 @@ export async function handleApiAdmin(request: Request, env: ApiAdminEnv) {
         401,
       )
     }
+
+    await Promise.all(rateKeys.map((key) => clearRateLimit(env, key, LOGIN_LIMIT)))
     return json(
       { ok: true, authenticated: true, username: expectedUser },
       200,
@@ -412,12 +471,34 @@ export async function handleApiAdmin(request: Request, env: ApiAdminEnv) {
       return json(
         {
           ok: false,
-          error: "invalid_endpoint",
+          error: error instanceof BlockedEndpointError ? "blocked_endpoint" : "invalid_endpoint",
           message: String(error instanceof Error ? error.message : error),
         },
         400,
       )
     }
+
+    // The stored key is bound to the stored endpoint. Repointing baseUrl while
+    // reusing it would forward the secret to an operator-chosen host — the
+    // admin UI deliberately never discloses the key, so that would be an
+    // exfiltration path. Changing the endpoint requires supplying a new key.
+    const submittedCustomKey = String(body.custom?.apiKey || "").trim()
+    if (
+      customBaseUrl !== saved.custom.baseUrl &&
+      saved.custom.apiKey &&
+      !submittedCustomKey
+    ) {
+      return json(
+        {
+          ok: false,
+          error: "api_key_required",
+          message:
+            "Đổi endpoint thì phải nhập lại API key — key đã lưu không được gửi sang endpoint mới.",
+        },
+        400,
+      )
+    }
+
     const next: StoredApiConfig = {
       provider:
         body.provider === "gemini"

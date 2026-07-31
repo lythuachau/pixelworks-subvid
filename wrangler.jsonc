@@ -17,9 +17,29 @@
       "id": "987234b7cab54acdb1134724321d18b0"
     }
   ],
-  // Optional link-import backend (self-hosted Cobalt). Set via dashboard or:
-  //   wrangler secret put COBALT_API_KEY
+  // Login lockout + proxy rate limits. KV is eventually consistent, so a burst
+  // of parallel logins all read the same stale counter and slip past the limit;
+  // a Durable Object serializes the read-modify-write instead.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RATE_LIMITER",
+        "class_name": "RateLimiter"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RateLimiter"]
+    }
+  ],
+  // Link-import backend (self-hosted Cobalt) and the media proxy signing key.
+  // MEDIA_PROXY_SECRET is REQUIRED — without it /api/media/* returns 503,
+  // because it is the only thing preventing an open proxy. Generate 32+ chars:
+  //   node -e "console.log(crypto.randomUUID()+crypto.randomUUID())"
   //   wrangler secret put MEDIA_PROXY_SECRET
+  //   wrangler secret put COBALT_API_KEY
   // Plain vars can also be set under `vars` for non-secret values.
   // "vars": {
   //   "COBALT_API_URL": "https://cobalt.example.com",

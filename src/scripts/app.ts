@@ -1,6 +1,5 @@
 import { createDownloadsController } from "@/scripts/downloads.ts";
 import { createApiInspectorController } from "@/scripts/apiInspector.ts";
-import { installDevtoolsGuard } from "@/scripts/devtoolsGuard.ts";
 import { createEditorHistory } from "@/scripts/editorHistory.ts";
 import { createEditorSegmentsController } from "@/scripts/editorSegments.ts";
 import { createExportModal } from "@/scripts/export/exportModal.ts";
@@ -71,7 +70,7 @@ const translateSegments = (
   segments: Segment[],
   sourceLang: string,
   targetLang: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; splitLongCues?: boolean },
 ) => translationService.translateSegments(segments, sourceLang, targetLang, options);
 
 const isTranslationReady = () => translationService.isTranslationReady()
@@ -481,7 +480,6 @@ const { downloadVideo, cancelExport } = createVideoExporter({
 });
 
 // ── Init ──
-installDevtoolsGuard(ui.devtoolsGuardToast, tt("devtoolsBlocked"));
 createApiInspectorController().wire();
 buildLangSelects();
 renderDownloads();

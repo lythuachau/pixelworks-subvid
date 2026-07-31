@@ -3,9 +3,10 @@
  * Used by the Vite dev middleware when COBALT_API_URL is unset.
  */
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
 import {
   extractSupportedMediaUrl,
@@ -25,6 +26,9 @@ import {
 const TEMP_PREFIX = "subvid-ytdlp-";
 const PROXY_TTL_SECONDS = 30 * 60;
 const DEFAULT_MAX_BYTES = 160_000_000;
+// Stable for the lifetime of this local server process. A restart intentionally
+// invalidates outstanding local download URLs.
+const LOCAL_MEDIA_PROXY_SECRET = randomBytes(32).toString("hex");
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -90,8 +94,23 @@ function guessContentType(filename) {
 function isAllowedTempFile(filePath) {
   const resolved = resolve(filePath);
   const tempRoot = resolve(tmpdir());
+  const relativePath = relative(tempRoot, resolved);
   const name = basename(resolved);
-  return resolved.startsWith(tempRoot) && name.startsWith(TEMP_PREFIX);
+  return (
+    relativePath.length > 0 &&
+    relativePath !== ".." &&
+    !relativePath.startsWith(`..\\`) &&
+    !relativePath.startsWith("../") &&
+    !isAbsolute(relativePath) &&
+    name.startsWith(TEMP_PREFIX)
+  );
+}
+
+function localProxySecret(env) {
+  return defaultProxySecret({
+    MEDIA_PROXY_SECRET:
+      env.MEDIA_PROXY_SECRET || LOCAL_MEDIA_PROXY_SECRET,
+  });
 }
 
 function tempStamp() {
@@ -217,10 +236,7 @@ async function signedFileResponse(downloaded, service, env, via) {
   let normalized = downloaded.filePath.replace(/\\/g, "/");
   if (!normalized.startsWith("/")) normalized = `/${normalized}`;
   const fileUrl = `file://${normalized}`;
-  const secret = defaultProxySecret({
-    ...env,
-    MEDIA_PROXY_SECRET: env.MEDIA_PROXY_SECRET || "local-ytdlp-proxy-secret",
-  });
+  const secret = localProxySecret(env);
   const token = await signProxyPayload(
     {
       u: fileUrl,
@@ -339,11 +355,10 @@ export async function handleLocalYtDlpProxy(request, env = {}) {
 
   const url = new URL(request.url);
   const token = url.searchParams.get("t") || "";
-  const secret = defaultProxySecret({
-    ...env,
-    MEDIA_PROXY_SECRET: env.MEDIA_PROXY_SECRET || "local-ytdlp-proxy-secret",
+  const secret = localProxySecret(env);
+  const payload = await verifyProxyToken(token, secret, {
+    allowFileProtocol: true,
   });
-  const payload = await verifyProxyToken(token, secret);
   if (!payload) {
     return json(
       {

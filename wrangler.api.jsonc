@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "subthis-now",
+  "main": "./src/apiWorker.ts",
+  "compatibility_date": "2026-06-02",
+  "kv_namespaces": [
+    {
+      "binding": "API_CONFIG",
+      "id": "987234b7cab54acdb1134724321d18b0"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RATE_LIMITER",
+        "class_name": "RateLimiter"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RateLimiter"]
+    }
+  ]
+}

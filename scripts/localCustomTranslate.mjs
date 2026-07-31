@@ -215,28 +215,30 @@ export async function listCustomModels(cfg) {
  */
 export async function resolveProtocol(cfg) {
   const explicit = (cfg.protocol || "auto").toLowerCase();
-  if (explicit === "anthropic" || explicit === "openai") return explicit;
+  if (
+    explicit === "anthropic" ||
+    explicit === "openai" ||
+    explicit === "responses"
+  )
+    return explicit;
+
+  // The transport belongs to the gateway, not the model name. In particular,
+  // api.leeh.dev exposes Claude IDs through OpenAI-compatible routes; guessing
+  // Anthropic from "claude-*" makes valid models fail despite appearing in
+  // /v1/models.
+  let host = "";
   try {
-    const models = await listCustomModels(cfg);
-    const match = cfg.model
-      ? models.find((m) => m.id === cfg.model)
-      : models[0];
-    const types = match?.supported_endpoint_types || [];
-    if (types.includes("anthropic")) return "anthropic";
-    if (types.includes("openai") || types.includes("openai-chat"))
-      return "openai";
-    // Older FreeModel deployments reported provider ownership instead of
-    // endpoint types; keep this compatibility fallback for Anthropic-owned IDs.
-    if (match?.owned_by === "anthropic") return "anthropic";
+    host = new URL(cfg.baseUrl).hostname.toLowerCase();
   } catch {
-    /* fall through */
+    /* normalized later by the caller */
   }
-  // Heuristic: many Claude gateways only support Anthropic messages.
-  if (/claude/i.test(cfg.model || "")) return "anthropic";
+  if (host === "api.anthropic.com" || host === "cc.freemodel.dev")
+    return "anthropic";
+  if (host === "api.freemodel.dev") return "responses";
   return "openai";
 }
 
-async function callAnthropic(cfg, model, prompt) {
+async function callAnthropic(cfg, model, prompt, options = {}) {
   const baseUrl = cfg.baseUrl.replace(/\/+$/, "");
   let res;
   try {
@@ -251,9 +253,10 @@ async function callAnthropic(cfg, model, prompt) {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 4096,
+        max_tokens: Number(options.maxTokens) || 4096,
         // Do not send temperature — some Claude models reject it.
         system:
+          options.system ||
           "You are a professional subtitle translator. Follow the user instructions exactly.",
         messages: [{ role: "user", content: prompt }],
       }),
@@ -279,7 +282,7 @@ async function callAnthropic(cfg, model, prompt) {
   return text;
 }
 
-async function callOpenAI(cfg, model, prompt) {
+async function callOpenAI(cfg, model, prompt, options = {}) {
   const baseUrl = cfg.baseUrl.replace(/\/+$/, "");
   let res;
   try {
@@ -292,12 +295,13 @@ async function callOpenAI(cfg, model, prompt) {
       },
       body: JSON.stringify({
         model,
-        temperature: 0.2,
-        max_tokens: 4096,
+        ...(options.omitTemperature ? {} : { temperature: 0.2 }),
+        max_tokens: Number(options.maxTokens) || 4096,
         messages: [
           {
             role: "system",
             content:
+              options.system ||
               "You are a professional subtitle translator. Follow the user instructions exactly.",
           },
           { role: "user", content: prompt },
@@ -321,6 +325,41 @@ async function callOpenAI(cfg, model, prompt) {
   if (!String(text).trim())
     throw new Error("OpenAI-compatible API returned empty translation");
   return String(text);
+}
+
+/**
+ * Generate one structured response through a custom OpenAI/Anthropic gateway.
+ * The caller owns JSON parsing and schema validation.
+ */
+export async function generateStructuredWithCustom(prompt, cfg, options = {}) {
+  const normalized = {
+    ...cfg,
+    baseUrl: normalizeCustomBaseUrl(cfg?.baseUrl || ""),
+    apiKey: String(cfg?.apiKey || "").trim(),
+    model: String(cfg?.model || "").trim(),
+    requestTimeoutMs: Number(options.requestTimeoutMs) || 150_000,
+  };
+  if (!normalized.baseUrl || !normalized.apiKey || !normalized.model)
+    throw new Error(
+      "Custom structured generation requires endpoint, API key, and model",
+    );
+  const protocol = await resolveProtocol(normalized);
+  if (protocol === "responses")
+    throw new Error(
+      "Structured cue planning does not support Responses protocol yet",
+    );
+  const call = protocol === "anthropic" ? callAnthropic : callOpenAI;
+  return {
+    engine: "custom",
+    model: normalized.model,
+    protocol,
+    text: await call(normalized, normalized.model, String(prompt || ""), {
+      maxTokens: Number(options.maxTokens) || 8192,
+      omitTemperature: true,
+      system:
+        "You are a subtitle sentence-boundary planner and professional translator. Return only the requested JSON.",
+    }),
+  };
 }
 
 /**
