@@ -25,6 +25,15 @@ foreach ($rawLine in Get-Content -LiteralPath $EnvironmentFile) {
     }
 }
 
+# node-postgres currently treats sslmode=require as verify-full unless its
+# libpq compatibility mode is explicit. Preserve the documented libpq/Aiven
+# meaning of "require" (encrypted TLS without a project CA) for this URL.
+if ($env:SUBVID_DATABASE_URL -match '(?i)([?&])sslmode=require(?:&|$)' -and
+    $env:SUBVID_DATABASE_URL -notmatch '(?i)([?&])uselibpqcompat=') {
+    $separator = if ($env:SUBVID_DATABASE_URL.Contains('?')) { '&' } else { '?' }
+    $env:SUBVID_DATABASE_URL = "$($env:SUBVID_DATABASE_URL)${separator}uselibpqcompat=true"
+}
+
 $protected = [IO.File]::ReadAllBytes($ProtectedKeyFile)
 $dataKey = $null
 try {
