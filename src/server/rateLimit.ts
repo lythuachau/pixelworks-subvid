@@ -1,12 +1,8 @@
 /**
- * Rate limiting that survives the Workers isolate lifecycle.
+ * Rate limiting that survives the Node process lifecycle.
  *
- * A per-isolate `Map` resets whenever Cloudflare recycles the isolate and is
- * not shared between colos, so it cannot enforce a login lockout. When the
- * `RATE_LIMITER` Durable Object binding is present all counters live there
- * (single-threaded, strongly consistent). The in-memory map stays as a
- * best-effort fallback for `wrangler dev` and for deployments that have not
- * applied the Durable Object migration yet.
+ * The production `RATE_LIMITER` binding uses atomic PostgreSQL transactions.
+ * The in-memory map remains a best-effort local-development fallback.
  */
 
 export type RateLimitOptions = {
@@ -53,10 +49,14 @@ type Entry = RateLimitEntry
 const memory = new Map<string, Entry>()
 
 const ALLOWED: RateDecision = { blocked: false, retryAfter: 0, degraded: false }
+const STORAGE_UNAVAILABLE: RateDecision = {
+  blocked: true,
+  retryAfter: 60,
+  degraded: true,
+}
 
 /**
- * Pure state machine shared by the Durable Object and the in-memory fallback,
- * so both enforce identical semantics (and so it is unit-testable).
+ * Pure state machine shared by persistent and in-memory implementations.
  */
 export function applyRateLimit(
   entry: Entry | undefined,
@@ -146,7 +146,7 @@ export async function rateLimitOp(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ op, options }),
     })
-    if (!response.ok) return memoryDecision(key, op, options)
+    if (!response.ok) return STORAGE_UNAVAILABLE
     const data = (await response.json()) as { blocked?: boolean; retryAfter?: number }
     return {
       blocked: Boolean(data.blocked),
@@ -154,8 +154,10 @@ export async function rateLimitOp(
       degraded: false,
     }
   } catch {
-    // Never fail the request because the limiter is unreachable.
-    return memoryDecision(key, op, options)
+    // A configured production limiter failing must not turn paid/admin APIs
+    // into unbounded endpoints. Local development has no binding and uses the
+    // in-memory path above.
+    return STORAGE_UNAVAILABLE
   }
 }
 

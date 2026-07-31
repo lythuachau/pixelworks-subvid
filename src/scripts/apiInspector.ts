@@ -228,7 +228,7 @@ export function createApiInspectorController() {
     if (adminDescription) {
       adminDescription.textContent = adminConfigured
         ? "Nhập tài khoản quản trị để mở endpoint, khóa API và model đã lưu."
-        : "Tài khoản chỉ được tạo hoặc thay đổi trực tiếp ở backend Cloudflare Worker."
+        : "Tài khoản chỉ được tạo hoặc thay đổi trực tiếp trên backend."
     }
     if (adminLoginBtn) adminLoginBtn.disabled = !adminConfigured
     adminUsername?.focus()

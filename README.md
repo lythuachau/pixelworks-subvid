@@ -19,13 +19,13 @@ No uploads. No backend. No API keys.
 
 [![Astro](https://img.shields.io/badge/Astro-6-FF5D01?logo=astro&logoColor=white)](https://astro.build)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-38BDF8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
-[![Cloudflare Workers](https://img.shields.io/badge/Deploy-Cloudflare_Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
+[![Node.js](https://img.shields.io/badge/Deploy-Node.js-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 
 </div>
 
 ## What it does
 
-1. **Upload a video or audio** — drag & drop, browse, or paste a **Douyin / TikTok / YouTube** link (link import needs Worker + Cobalt; see below). Supports MP4, MOV, WebM, MKV, MP3, WAV, and OGG.
+1. **Upload a video or audio** — drag & drop, browse, or paste a **Douyin / TikTok / YouTube** link. Supports MP4, MOV, WebM, MKV, MP3, WAV, and OGG.
 2. **Configure languages** — pick the audio language (or auto-detect) and the subtitle language.
 3. **Open subtitle tracks** — ASR/Whisper is not bundled; use an existing subtitle project/track, then translate when needed.
 4. **Edit in the timeline** — fix text, timing, and styling with undo/redo.
@@ -51,12 +51,12 @@ Video and audio processing stay on the local machine. Translation sends subtitle
 
 | Layer | Technology |
 | --- | --- |
-| Framework | [Astro 6](https://astro.build) (static site) |
+| Framework | [Astro 6](https://astro.build) with the Node adapter |
 | Styling | [Tailwind CSS 4](https://tailwindcss.com) |
 | Translation | Gemini API or custom OpenAI/Anthropic-compatible API |
 | Audio extraction | [@ffmpeg/ffmpeg](https://ffmpegwasm.netlify.app) (WASM) |
 | Video export | [mediabunny](https://www.npmjs.com/package/mediabunny) + WebCodecs |
-| Deployment | [Cloudflare Workers](https://workers.cloudflare.com) (static assets) |
+| Deployment | Node.js behind Caddy |
 
 ## Requirements
 
@@ -79,7 +79,9 @@ pnpm install
 pnpm dev
 ```
 
-File upload works with **no environment variables**. Optional **link import** (Douyin / TikTok / YouTube) needs a deployed Worker plus a self-hosted [Cobalt](https://github.com/imputnet/cobalt) instance — see [Link import](#link-import-douyin--tiktok--youtube).
+File upload works with **no environment variables**. Backend translation,
+transcription, API administration, and link import require the server-side
+configuration documented below.
 
 ## Scripts
 
@@ -88,8 +90,8 @@ File upload works with **no environment variables**. Optional **link import** (D
 | `pnpm dev` | Start Astro dev server at `localhost:4321` |
 | `pnpm build` | Build the production site to `./dist/` |
 | `pnpm preview` | Preview the production build locally |
-| `pnpm preview:cf` | Build and preview with Wrangler (Cloudflare Workers runtime) |
-| `pnpm deploy` | Build and deploy to Cloudflare Workers |
+| `pnpm start` | Run the standalone Node production build |
+| `pnpm deploy` | Build the standalone Node release |
 
 ## Project structure
 
@@ -122,37 +124,30 @@ The app is a multi-stage SPA embedded in static Astro pages. Server-rendered cop
 
 ## Deployment
 
-The site is deployed as static assets on Cloudflare Workers. Configuration lives in `wrangler.jsonc`:
+The site runs as a standalone Astro Node server bound to loopback behind Caddy:
 
 ```sh
-pnpm deploy
+pnpm build
+HOST=127.0.0.1 PORT=4321 pnpm start
 ```
 
-You need a [Cloudflare account](https://dash.cloudflare.com) and Wrangler authenticated (`wrangler login`).
-
-### Rate limiting (Durable Object)
-
-Login attempts and the media/speech APIs are rate limited through a `RATE_LIMITER`
-Durable Object (`src/server/rateLimiterDo.ts`), declared in `wrangler.jsonc` with a
-`new_sqlite_classes` migration — free-plan eligible. KV is **not** used here: it is
-eventually consistent, so an attacker can race parallel requests past a KV-backed
-lockout. The first `pnpm deploy` after adding the binding applies migration `v1`.
-
-If the binding is missing (e.g. a stripped-down environment) the limiter degrades to
-per-isolate memory instead of failing the deploy — weaker, but never fail-open in a
-way that breaks the site.
+Apply `deploy/postgres-schema.sql` to the Aiven database before enabling dynamic
+configuration. Set `SUBVID_DATABASE_URL` and a 32-byte base64
+`SUBVID_CONFIG_DATA_KEY` through the service environment. Provider keys are
+AES-256-GCM encrypted before being written to PostgreSQL. Login, media, and
+speech rate limits use atomic PostgreSQL transactions.
 
 ## Link import (Douyin · TikTok · YouTube)
 
 The upload stage accepts a pasteable share link in addition to local files. Flow:
 
-1. Browser `POST /api/media/resolve` with the URL (Worker validates host allowlist).
-2. Worker calls your **self-hosted Cobalt** instance and returns a short-lived same-origin proxy path.
+1. Browser `POST /api/media/resolve` with the URL (Node validates the host allowlist).
+2. Node calls local yt-dlp or a configured **self-hosted Cobalt** instance and returns a short-lived same-origin proxy path.
 3. Browser downloads via `GET /api/media/proxy`, builds a `File`, then reuses the normal subtitle pipeline.
 
 ### Configure
 
-Copy `env.example` and set secrets/vars on the Worker (dashboard or Wrangler):
+Copy `env.example` and set secrets in the external service environment:
 
 | Variable | Required | Description |
 | --- | --- | --- |
@@ -161,16 +156,8 @@ Copy `env.example` and set secrets/vars on the Worker (dashboard or Wrangler):
 | `MEDIA_PROXY_SECRET` | **yes** | HMAC secret for proxy download tokens, ≥ 32 chars. Without it `/api/media/*` returns `503 proxy_unavailable` — there is no fallback secret |
 | `MEDIA_MAX_BYTES` | no | Max import size (default `160000000` ≈ 160 MB) |
 
-```sh
-# example (non-secret)
-npx wrangler secret put COBALT_API_KEY
-
-# required — generate a strong value first
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-npx wrangler secret put MEDIA_PROXY_SECRET
-```
-
-Also set `COBALT_API_URL` as a Worker var (or uncomment `vars` in `wrangler.jsonc`).
+Generate `MEDIA_PROXY_SECRET` outside the repository and never pass it on the
+command line in production.
 
 **Important:** do not point production traffic at the public `api.cobalt.tools` instance — it uses bot protection and is not for third-party apps. [Run your own Cobalt instance](https://github.com/imputnet/cobalt/blob/main/docs/run-an-instance.md).
 
@@ -180,7 +167,7 @@ Also set `COBALT_API_URL` as a Worker var (or uncomment `vars` in `wrangler.json
 - **TikTok** — `tiktok.com`, `vm.tiktok.com`, `vt.tiktok.com`, …
 - **YouTube** — `youtube.com`, `youtu.be`, `music.youtube.com`
 
-Photo-only carousels / multi-item pickers without a video track are rejected with a clear UI error. Prefer short clips; imports default to **720p** for size limits on Workers.
+Photo-only carousels / multi-item pickers without a video track are rejected with a clear UI error. Prefer short clips; imports default to **720p**.
 
 ### Local development
 

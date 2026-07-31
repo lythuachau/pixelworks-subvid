@@ -451,7 +451,7 @@ export async function handleApiAdmin(request: Request, env: ApiAdminEnv) {
         {
           ok: false,
           error: "config_store_missing",
-          message: "Cloudflare KV API_CONFIG chưa được cấu hình.",
+          message: "Kho cấu hình backend chưa được cấu hình.",
         },
         503,
       )

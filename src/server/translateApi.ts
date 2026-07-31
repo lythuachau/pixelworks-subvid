@@ -79,8 +79,8 @@ function resolveCustomCredentials(
 /**
  * True when `url` points at infrastructure rather than a public API.
  *
- * `ALLOW_PRIVATE_TRANSLATE_ENDPOINT=1` exists only so the test suite (and
- * `wrangler dev`) can target a loopback stub. Never set it in production —
+ * `ALLOW_PRIVATE_TRANSLATE_ENDPOINT=1` exists only so the test suite and local
+ * development can target a loopback stub. Never set it in production —
  * it re-opens the endpoint field as an SSRF primitive.
  */
 function endpointBlocked(env: TranslateEnv, url: string) {

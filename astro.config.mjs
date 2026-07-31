@@ -3,32 +3,17 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'astro/config';
 
 import tailwindcss from '@tailwindcss/vite';
-import cloudflare from '@astrojs/cloudflare';
+import node from '@astrojs/node';
 import sitemap from '@astrojs/sitemap';
 import { localMediaApiPlugin } from './scripts/localMediaApiPlugin.mjs';
-
-// Local Windows hosts currently crash Cloudflare's workerd runner used by
-// @astrojs/cloudflare + @cloudflare/vite-plugin ("internal error; reference = …").
-// Use LOCAL_STATIC=1 for local install/open; production still targets Cloudflare.
-const localStatic = process.env.LOCAL_STATIC === '1';
 
 // https://astro.build/config
 export default defineConfig({
   // Production URL — required for absolute canonical/hreflang/OG URLs and the
   // sitemap. Update this if the site is served from a different domain.
   site: 'https://subvid.app',
-  output: localStatic ? 'static' : 'server',
-  // The Cloudflare adapter targets the Workers runtime for edge middleware,
-  // while the public pages are emitted as prerendered static assets.
-  adapter: localStatic
-    ? undefined
-    : cloudflare({
-        // Ensure custom production bindings (API_CONFIG, assets routing, etc.)
-        // are copied into Astro's generated dist/server/wrangler.json.
-        configPath: './wrangler.jsonc',
-        prerenderEnvironment: 'node',
-        imageService: 'compile',
-      }),
+  output: 'server',
+  adapter: node({ mode: 'standalone' }),
   i18n: {
     locales: ['vi'],
     defaultLocale: 'vi',

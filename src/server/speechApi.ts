@@ -170,8 +170,7 @@ export async function handleSpeechApi(request: Request, env: SpeechEnv) {
 
   // Transcription runs on the server's GROQ_API_KEY, so it is admin-only —
   // same gate as /api/translate. Without this the endpoint is an open,
-  // anonymous spend of the owner's Groq quota (reachable directly on the
-  // workers.dev hostname, bypassing the Caddy forward_auth gateway).
+  // anonymous spend of the owner's Groq quota.
   if (!env.TRUSTED_LOCAL_REQUEST) {
     const denied = await requireApiAdmin(request, env)
     if (denied) return denied

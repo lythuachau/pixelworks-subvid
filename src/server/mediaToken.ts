@@ -106,7 +106,7 @@ export async function verifyProxyToken(
 export class MissingProxySecretError extends Error {
   constructor() {
     super(
-      "MEDIA_PROXY_SECRET is not configured. Set it with `wrangler secret put MEDIA_PROXY_SECRET`.",
+      "MEDIA_PROXY_SECRET is not configured on the backend.",
     );
     this.name = "MissingProxySecretError";
   }
