@@ -45,10 +45,12 @@ if ($LASTEXITCODE -ne 0) { throw "Service SID configuration failed." }
 & sc.exe config $serviceId obj= "NT SERVICE\$serviceId" start= demand | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Virtual service account configuration failed." }
 
-& icacls.exe $ServiceRoot /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "NT SERVICE\${serviceId}:(OI)(CI)RX" /T /C | Out-Null
+& icacls.exe $ServiceRoot /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "NT SERVICE\${serviceId}:(OI)(CI)RX" | Out-Null
+& icacls.exe (Join-Path $ServiceRoot '*') /reset /T /C | Out-Null
 & icacls.exe $DataRoot /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "NT SERVICE\${serviceId}:(OI)(CI)RX" | Out-Null
 foreach ($path in @($logs, $temp)) {
-    & icacls.exe $path /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "NT SERVICE\${serviceId}:(OI)(CI)M" /T /C | Out-Null
+    & icacls.exe $path /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "NT SERVICE\${serviceId}:(OI)(CI)M" | Out-Null
+    & icacls.exe (Join-Path $path '*') /reset /T /C | Out-Null
 }
 & icacls.exe $secretRoot /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "NT SERVICE\${serviceId}:(OI)(CI)RX" | Out-Null
 foreach ($path in @($EnvironmentFile, $ProtectedKeyFile)) {
