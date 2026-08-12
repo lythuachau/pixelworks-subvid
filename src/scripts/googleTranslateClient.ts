@@ -76,8 +76,10 @@ export type TranslateApiTestResult = {
   diagnostic?: string
 }
 
-const LS_KEY = "subvid.translate.custom.v1"
-const GEMINI_LS_KEY = "subvid.translate.gemini.v1"
+export const TRANSLATE_SETTINGS_STORAGE_KEY = "subvid.translate.custom.v1"
+export const GEMINI_SETTINGS_STORAGE_KEY = "subvid.translate.gemini.v1"
+export const TRANSLATE_SETTINGS_CHANGED_EVENT =
+  "subvid:translate-settings-changed"
 
 export type SavedCustomTranslateSettings = {
   provider: TranslateProvider
@@ -106,7 +108,7 @@ export function loadSavedTranslateSettings(): SavedCustomTranslateSettings {
   }
   if (typeof localStorage === "undefined") return defaults
   try {
-    const raw = localStorage.getItem(LS_KEY)
+    const raw = localStorage.getItem(TRANSLATE_SETTINGS_STORAGE_KEY)
     if (!raw) return defaults
     const parsed = JSON.parse(raw)
     return {
@@ -132,14 +134,15 @@ export function loadSavedTranslateSettings(): SavedCustomTranslateSettings {
 export function saveTranslateSettings(settings: Partial<SavedCustomTranslateSettings>) {
   if (typeof localStorage === "undefined") return
   const next = { ...loadSavedTranslateSettings(), ...settings }
-  localStorage.setItem(LS_KEY, JSON.stringify(next))
+  localStorage.setItem(TRANSLATE_SETTINGS_STORAGE_KEY, JSON.stringify(next))
+  invalidateTranslateStatus()
 }
 
 export function loadSavedGeminiSettings(): SavedGeminiSettings {
   const defaults: SavedGeminiSettings = { apiKey: "", model: "" }
   if (typeof localStorage === "undefined") return defaults
   try {
-    const raw = localStorage.getItem(GEMINI_LS_KEY)
+    const raw = localStorage.getItem(GEMINI_SETTINGS_STORAGE_KEY)
     if (!raw) return defaults
     const parsed = JSON.parse(raw)
     return {
@@ -154,11 +157,24 @@ export function loadSavedGeminiSettings(): SavedGeminiSettings {
 export function saveGeminiSettings(settings: Partial<SavedGeminiSettings>) {
   if (typeof localStorage === "undefined") return
   const next = { ...loadSavedGeminiSettings(), ...settings }
-  localStorage.setItem(GEMINI_LS_KEY, JSON.stringify(next))
+  localStorage.setItem(GEMINI_SETTINGS_STORAGE_KEY, JSON.stringify(next))
+  invalidateTranslateStatus()
 }
 
 let cachedStatus: TranslateStatus | null = null
 let statusPromise: Promise<TranslateStatus> | null = null
+
+export function invalidateTranslateStatus() {
+  cachedStatus = null
+  statusPromise = null
+}
+
+export function notifyTranslateSettingsChanged() {
+  invalidateTranslateStatus()
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(TRANSLATE_SETTINGS_CHANGED_EVENT))
+  }
+}
 
 export async function getTranslateStatus(force = false): Promise<TranslateStatus> {
   if (!force && cachedStatus) return cachedStatus
@@ -223,6 +239,31 @@ export async function isApiTranslateAvailable(
     loadSavedTranslateSettings().apiKey &&
     (loadSavedTranslateSettings().model || loadSavedTranslateSettings().models.length)
   ))
+}
+
+export async function resolveAvailableTranslateProvider(
+  requested: TranslateProvider = "auto",
+): Promise<Exclude<TranslateProvider, "auto"> | null> {
+  if (requested !== "auto" && (await isApiTranslateAvailable(requested)))
+    return requested
+
+  const status = await getTranslateStatus()
+  const preferred =
+    status.preferred === "gemini" || status.preferred === "custom"
+      ? status.preferred
+      : null
+  const candidates: Array<Exclude<TranslateProvider, "auto">> =
+    requested === "auto"
+      ? [preferred, "gemini", "custom"].filter(
+          (provider): provider is Exclude<TranslateProvider, "auto"> =>
+            provider !== null,
+        )
+      : [requested === "gemini" ? "custom" : "gemini"]
+
+  for (const provider of [...new Set(candidates)]) {
+    if (await isApiTranslateAvailable(provider)) return provider
+  }
+  return null
 }
 
 export async function listGeminiModels(options: {

@@ -1,5 +1,3 @@
-import { execFile } from "node:child_process";
-
 import {
   detectMediaService,
   extractSupportedMediaUrl,
@@ -9,6 +7,11 @@ import {
   DOUYIN_FETCH_HEADERS,
   resolveDouyinMedia,
 } from "@/server/douyinResolve.ts";
+import { contentDisposition } from "@/server/httpHeaders.ts";
+import {
+  completedExpectedTransfer,
+  resumedTransferTotal,
+} from "@/server/mediaStream.ts";
 import {
   defaultProxySecret,
   MissingProxySecretError,
@@ -21,6 +24,7 @@ import {
   recordRateLimitFailure,
   type RateLimitBinding,
 } from "@/server/rateLimit.ts";
+import { runYtDlp, YtDlpError } from "@/server/ytDlp.ts";
 
 export type MediaEnv = {
   COBALT_API_URL?: string;
@@ -39,6 +43,7 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 20;
 /** Redirect hops the proxy will follow, re-checking the allowlist each time. */
 const MAX_REDIRECTS = 5;
+const MAX_STREAM_RESUMES = 8;
 const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"')\]]+/gi;
 
 type CobaltTunnelResponse = {
@@ -71,13 +76,6 @@ type CobaltResponse =
   | CobaltErrorResponse
   | CobaltLocalProcessingResponse
   | { status: string };
-
-type YtDlpInfo = {
-  url?: string;
-  title?: string;
-  ext?: string;
-  requested_downloads?: Array<{ url?: string }>;
-};
 
 function json(
   body: unknown,
@@ -204,43 +202,6 @@ async function callCobalt(
   return data;
 }
 
-function runYtDlp(executable: string, mediaUrl: string): Promise<YtDlpInfo> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      executable,
-      [
-        "--no-playlist",
-        "--no-warnings",
-        "--no-progress",
-        "--skip-download",
-        "--dump-single-json",
-        "--socket-timeout",
-        "20",
-        "--format",
-        "best[ext=mp4]/best",
-        "--",
-        mediaUrl,
-      ],
-      {
-        windowsHide: true,
-        timeout: 60_000,
-        maxBuffer: 4 * 1024 * 1024,
-        encoding: "utf8",
-      },
-      (error, stdout) => {
-        if (error) {
-          reject(new Error("yt_dlp_failed"));
-          return;
-        }
-        try {
-          resolve(JSON.parse(stdout) as YtDlpInfo);
-        } catch {
-          reject(new Error("yt_dlp_invalid_json"));
-        }
-      },
-    );
-  });
-}
 
 async function resolveWithYtDlp(
   env: MediaEnv,
@@ -346,6 +307,7 @@ export async function handleMediaResolve(
   }
 
   // Cookie-free Douyin path (no Cobalt required)
+  let douyinNativeError = "";
   if (extracted.service === "douyin") {
     try {
       const resolved = await resolveDouyinMedia(extracted.url);
@@ -365,8 +327,11 @@ export async function handleMediaResolve(
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      // If Cobalt is configured, fall through; otherwise fail clearly.
-      if (!env.COBALT_API_URL) {
+      douyinNativeError = message;
+      // If Cobalt is configured, fall through to Cobalt.
+      // If yt-dlp is configured, fall through to the yt-dlp block below.
+      // Only fail immediately when neither fallback is available.
+      if (!env.COBALT_API_URL && !env.YTDLP_PATH) {
         return json(
           {
             ok: false,
@@ -395,12 +360,26 @@ export async function handleMediaResolve(
           contentType: guessContentType(resolved.filename),
           via: "yt-dlp-local",
         });
-      } catch {
+      } catch (error) {
+        const detail = error instanceof YtDlpError ? error.detail : "";
+        console.error(
+          "[media-resolve] yt_dlp_failed",
+          JSON.stringify({
+            service: extracted.service,
+            detail,
+            douyinNativeError: douyinNativeError || undefined,
+          }),
+        );
+        const parts = [
+          "Could not resolve this link with local yt-dlp.",
+          detail,
+          douyinNativeError ? `Douyin native: ${douyinNativeError}` : "",
+        ].filter(Boolean);
         return json(
           {
             ok: false,
             error: "failed",
-            message: "Could not resolve this link with local yt-dlp.",
+            message: parts.join(" "),
           },
           502,
         );
@@ -531,6 +510,106 @@ export async function handleMediaResolve(
 
 class BlockedTargetError extends Error {}
 
+class UpstreamFetchError extends Error {
+  readonly host: string;
+  readonly errorName: string;
+  readonly causeName: string;
+  readonly causeCode: string;
+
+  constructor(host: string, error: unknown) {
+    super("upstream_fetch_failed");
+    this.name = "UpstreamFetchError";
+    this.host = host;
+    this.errorName = diagnosticValue(
+      error instanceof Error ? error.name : typeof error,
+    );
+    const cause =
+      error && typeof error === "object" && "cause" in error
+        ? (error as { cause?: unknown }).cause
+        : undefined;
+    this.causeName = diagnosticValue(
+      cause && typeof cause === "object" && "name" in cause
+        ? (cause as { name?: unknown }).name
+        : "",
+    );
+    this.causeCode = diagnosticValue(
+      cause && typeof cause === "object" && "code" in cause
+        ? (cause as { code?: unknown }).code
+        : "",
+    );
+  }
+}
+
+function diagnosticValue(value: unknown): string {
+  return String(value || "")
+    .replace(/[^a-z0-9_.:-]/gi, "")
+    .slice(0, 64);
+}
+
+function streamErrorCode(error: unknown): string {
+  const cause =
+    error && typeof error === "object" && "cause" in error
+      ? (error as { cause?: unknown }).cause
+      : undefined;
+  return diagnosticValue(
+    cause && typeof cause === "object" && "code" in cause
+      ? (cause as { code?: unknown }).code
+      : "",
+  );
+}
+
+function canResumeStream(error: unknown): boolean {
+  return ["ECONNRESET", "ETIMEDOUT", "UND_ERR_SOCKET"].includes(
+    streamErrorCode(error),
+  );
+}
+
+function safeMediaHost(target: string): string {
+  try {
+    return new URL(target).hostname.toLowerCase();
+  } catch {
+    return "invalid-host";
+  }
+}
+
+function logMediaProxyFailure(
+  phase: "fetch" | "status" | "stream",
+  target: string,
+  error?: unknown,
+  status?: number,
+): void {
+  const fetchError = error instanceof UpstreamFetchError ? error : null;
+  const cause =
+    error && typeof error === "object" && "cause" in error
+      ? (error as { cause?: unknown }).cause
+      : undefined;
+  console.error(
+    "[media-proxy] upstream_failure",
+    JSON.stringify({
+      phase,
+      host: fetchError?.host || safeMediaHost(target),
+      status: Number.isInteger(status) ? status : undefined,
+      errorName:
+        fetchError?.errorName ||
+        diagnosticValue(error instanceof Error ? error.name : typeof error),
+      causeName:
+        fetchError?.causeName ||
+        diagnosticValue(
+          cause && typeof cause === "object" && "name" in cause
+            ? (cause as { name?: unknown }).name
+            : "",
+        ),
+      causeCode:
+        fetchError?.causeCode ||
+        diagnosticValue(
+          cause && typeof cause === "object" && "code" in cause
+            ? (cause as { code?: unknown }).code
+            : "",
+        ),
+    }),
+  );
+}
+
 /**
  * Fetch `target`, following redirects by hand so the allowlist is re-checked
  * on every hop. With `redirect: "follow"` an allowed CDN could 302 the Worker
@@ -540,6 +619,7 @@ async function fetchAllowedMedia(
   target: string,
   request: Request,
   env: MediaEnv,
+  rangeStart = 0,
 ): Promise<Response> {
   const cobaltHost = cobaltHostname(env.COBALT_API_URL);
   let current = target;
@@ -555,18 +635,25 @@ async function fetchAllowedMedia(
 
     const isDouyinCdn =
       /snssdk\.com|douyin|byteicdn|tiktokcdn|ibytedtos/i.test(parsed.hostname);
-    const response = await fetch(current, {
-      method: request.method,
-      headers: isDouyinCdn
+    let response: Response;
+    try {
+      const headers: Record<string, string> = isDouyinCdn
         ? { ...DOUYIN_FETCH_HEADERS }
         : {
             // Some CDNs are picky; keep headers minimal.
             Accept: "*/*",
             "User-Agent":
               request.headers.get("User-Agent") || "subvid-media-proxy/1.0",
-          },
-      redirect: "manual",
-    });
+          };
+      if (rangeStart > 0) headers.Range = `bytes=${rangeStart}-`;
+      response = await fetch(current, {
+        method: request.method,
+        headers,
+        redirect: "manual",
+      });
+    } catch (error) {
+      throw new UpstreamFetchError(parsed.hostname, error);
+    }
 
     const location =
       response.status >= 300 && response.status < 400
@@ -624,17 +711,23 @@ export async function handleMediaProxy(
         403,
       );
     }
+    logMediaProxyFailure("fetch", payload.u, error);
     return json(
-      { ok: false, error: "failed", message: "Upstream media fetch failed." },
+      {
+        ok: false,
+        error: "download_failed",
+        message: "The link was resolved, but the video CDN could not be reached.",
+      },
       502,
     );
   }
 
   if (!upstream.ok || !upstream.body) {
+    logMediaProxyFailure("status", payload.u, undefined, upstream.status);
     return json(
       {
         ok: false,
-        error: "failed",
+        error: "download_failed",
         message: `Upstream returned ${upstream.status}.`,
       },
       502,
@@ -642,11 +735,11 @@ export async function handleMediaProxy(
   }
 
   const limit = maxBytes(env);
-  const contentLengthHeader =
+  let expectedLengthHeader =
     upstream.headers.get("Content-Length") ||
     upstream.headers.get("Estimated-Content-Length");
-  if (contentLengthHeader) {
-    const length = Number(contentLengthHeader);
+  if (expectedLengthHeader) {
+    const length = Number(expectedLengthHeader);
     if (Number.isFinite(length) && length > limit) {
       return json(
         {
@@ -668,27 +761,87 @@ export async function handleMediaProxy(
   let transferred = 0;
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
-  const reader = upstream.body.getReader();
+  let reader = upstream.body.getReader();
+  let resumeCount = 0;
 
   ;(async () => {
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-        transferred += value.byteLength;
-        if (transferred > limit) {
-          await writer.abort(new Error("too_large"));
+    while (true) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          transferred += value.byteLength;
+          if (transferred > limit) {
+            await writer.close();
+            return;
+          }
+          await writer.write(value);
+        }
+        await writer.close();
+        return;
+      } catch (error) {
+        if (canResumeStream(error) && resumeCount < MAX_STREAM_RESUMES) {
+          try {
+            const resumed = await fetchAllowedMedia(
+              payload.u,
+              request,
+              env,
+              transferred,
+            );
+            const total = resumedTransferTotal(
+              resumed.status,
+              resumed.headers.get("Content-Range"),
+              transferred,
+            );
+            if (!resumed.body || total === null || total > limit) {
+              await resumed.body?.cancel().catch(() => {});
+              throw new Error("resume_rejected");
+            }
+            resumeCount += 1;
+            expectedLengthHeader = String(total);
+            reader = resumed.body.getReader();
+            console.warn(
+              "[media-proxy] upstream_resume",
+              JSON.stringify({
+                host: safeMediaHost(payload.u),
+                offset: transferred,
+                attempt: resumeCount,
+              }),
+            );
+            continue;
+          } catch (resumeError) {
+            if (
+              completedExpectedTransfer(transferred, expectedLengthHeader)
+            ) {
+              await writer.close();
+              return;
+            }
+            error = resumeError;
+          }
+        }
+        if (completedExpectedTransfer(transferred, expectedLengthHeader)) {
+          console.warn(
+            "[media-proxy] upstream_closed_after_complete_transfer",
+            JSON.stringify({
+              host: safeMediaHost(payload.u),
+              transferred,
+            }),
+          );
+          await writer.close();
           return;
         }
-        await writer.write(value);
-      }
-      await writer.close();
-    } catch (error) {
-      try {
-        await writer.abort(error);
-      } catch {
-        // ignore
+        logMediaProxyFailure("stream", payload.u, error);
+        try {
+          // Do not pass the upstream exception into Astro's response adapter.
+          // Its uncaught-stream logger includes the full request query, which
+          // contains the signed media token. The client still detects a short
+          // response from the Content-Length mismatch.
+          await writer.close();
+        } catch {
+          // ignore
+        }
+        return;
       }
     }
   })();
@@ -697,10 +850,10 @@ export async function handleMediaProxy(
     "Content-Type": contentType,
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
-    "Content-Disposition": `attachment; filename="${filename.replace(/"/g, "")}"`,
+    "Content-Disposition": contentDisposition(filename),
   });
-  if (contentLengthHeader) {
-    headers.set("Content-Length", contentLengthHeader);
+  if (expectedLengthHeader) {
+    headers.set("Content-Length", expectedLengthHeader);
   }
   const estimated = upstream.headers.get("Estimated-Content-Length");
   if (estimated) headers.set("Estimated-Content-Length", estimated);

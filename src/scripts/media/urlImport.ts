@@ -19,6 +19,7 @@ export type UrlImportErrorCode =
   | "invalid"
   | "unsupported"
   | "failed"
+  | "downloadFailed"
   | "tooLarge"
   | "notConfigured"
   | "pickerUnsupported"
@@ -55,6 +56,8 @@ function mapServerError(error?: string): UrlImportErrorCode {
       return "invalid";
     case "unsupported":
       return "unsupported";
+    case "download_failed":
+      return "downloadFailed";
     case "not_configured":
       return "notConfigured";
     case "picker_unsupported":

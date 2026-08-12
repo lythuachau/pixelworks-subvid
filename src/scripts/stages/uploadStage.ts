@@ -126,6 +126,8 @@ export function createUploadStageController({
           return tt("urlImport.invalid");
         case "unsupported":
           return tt("urlImport.unsupported");
+        case "downloadFailed":
+          return tt("urlImport.downloadFailed");
         case "tooLarge":
           return tt("urlImport.tooLarge");
         case "notConfigured":

@@ -2,6 +2,9 @@ import {
   isApiTranslateAvailable,
   loadSavedGeminiSettings,
   loadSavedTranslateSettings,
+  notifyTranslateSettingsChanged,
+  resolveAvailableTranslateProvider,
+  saveTranslateSettings,
   translateTextsWithGoogle,
   type TranslateProvider,
 } from "@/scripts/googleTranslateClient.ts"
@@ -215,16 +218,21 @@ export function createTranslationService(options: TranslationServiceOptions) {
   }
 
   async function ensureTranslation() {
-    const provider = selectedTranslateProvider()
-    if (!(await isApiTranslateAvailable(provider))) {
+    const selectedProvider = selectedTranslateProvider()
+    const provider = await resolveAvailableTranslateProvider(selectedProvider)
+    if (!provider) {
       translationReady = false
       options.updateDownloadStatus("translation", "error")
       throw new Error(
         "Chưa cấu hình API dịch. Hãy chọn Gemini hoặc nhập endpoint và API key hợp lệ.",
       )
     }
+    if (provider !== selectedProvider && selectedProvider !== "auto") {
+      saveTranslateSettings({ provider })
+      notifyTranslateSettingsChanged()
+    }
     markApiReady(provider)
-    return "api" as const
+    return provider
   }
 
   async function translateWithApi(
@@ -272,7 +280,7 @@ export function createTranslationService(options: TranslationServiceOptions) {
     if (!(LANGS as any)[sourceLang] || !(LANGS as any)[targetLang])
       return segments.map((segment) => ({ ...segment }))
 
-    await ensureTranslation()
+    const readyProvider = await ensureTranslation()
     const controller = new AbortController()
     const abortFromCaller = () => controller.abort(requestOptions.signal?.reason)
     requestOptions.signal?.addEventListener("abort", abortFromCaller, {
@@ -310,12 +318,7 @@ export function createTranslationService(options: TranslationServiceOptions) {
       const requestBudgets = groups.map((group) =>
         groupCharBudget(group, segments, targetLang),
       )
-      const selectedProvider = selectedTranslateProvider()
-      const primaryProvider =
-        selectedProvider === "auto" &&
-        (await isApiTranslateAvailable("gemini"))
-          ? "gemini"
-          : selectedProvider
+      const primaryProvider = readyProvider
       let translatedTexts = preparedTexts.map(() => "")
       const translatedCovered = preparedTexts.map(() => false)
       if (requestTexts.length) {
@@ -332,11 +335,10 @@ export function createTranslationService(options: TranslationServiceOptions) {
       } catch (primaryError) {
         if (controller.signal.aborted) throw primaryError
         const fallbackProvider: TranslateProvider | null =
-          selectedProvider === "auto" &&
           primaryProvider === "gemini" &&
           (await isApiTranslateAvailable("custom"))
             ? "custom"
-            : primaryProvider !== "gemini" &&
+            : primaryProvider === "custom" &&
                 (await isApiTranslateAvailable("gemini"))
               ? "gemini"
               : null

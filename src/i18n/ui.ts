@@ -100,6 +100,8 @@ export const ui = {
       groqGenerate: "Tạo phụ đề bằng Whisper (Groq)",
       groqPreparing: "Đang trích xuất audio từ video…",
       groqTranscribing: "Đang nhận dạng lời thoại bằng Groq Whisper…",
+      groqTranscribingPart:
+        "Đang nhận dạng lời thoại bằng Groq Whisper… phần {current}/{total}",
       groqNoSegments: "Groq Whisper không trả về đoạn lời thoại nào.",
       groqReady: "Đã nhận dạng {count} câu bằng {model}.",
       cancelled: "Đã hủy.",
@@ -337,6 +339,8 @@ export const ui = {
         invalid: "Hãy dán liên kết Douyin, TikTok hoặc YouTube hợp lệ.",
         unsupported: "Chỉ hỗ trợ liên kết Douyin, TikTok và YouTube.",
         failed: "Không thể nhập liên kết này. Hãy thử URL khác hoặc tải tệp lên.",
+        downloadFailed:
+          "Đã phân tích được liên kết nhưng máy chủ không tải được video từ CDN. Hãy thử lại hoặc tải tệp lên.",
         tooLarge: "Video quá lớn. Hãy dùng clip ngắn hơn hoặc tải tệp trực tiếp.",
         notConfigured:
           "Máy chủ chưa được cấu hình để nhập bằng liên kết. Hãy tải tệp trực tiếp.",
@@ -515,6 +519,8 @@ export const ui = {
       groqGenerate: "Generar subtítulos con Whisper (Groq)",
       groqPreparing: "Extrayendo audio del video…",
       groqTranscribing: "Reconociendo el diálogo con Groq Whisper…",
+      groqTranscribingPart:
+        "Reconociendo el diálogo con Groq Whisper… parte {current}/{total}",
       groqNoSegments: "Groq Whisper no devolvió segmentos de diálogo.",
       groqReady: "Se reconocieron {count} líneas con {model}.",
       cancelled: "Cancelado.",
@@ -753,6 +759,8 @@ export const ui = {
         unsupported: "Solo se admiten enlaces de Douyin, TikTok y YouTube.",
         failed:
           "No se pudo importar este enlace. Prueba otra URL o sube un archivo.",
+        downloadFailed:
+          "El enlace se resolvió, pero el servidor no pudo descargar el vídeo desde la CDN. Inténtalo de nuevo o sube el archivo.",
         tooLarge:
           "Este vídeo es demasiado grande para importar. Prueba un clip más corto o sube un archivo.",
         notConfigured:
