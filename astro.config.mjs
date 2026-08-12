@@ -14,6 +14,12 @@ export default defineConfig({
   site: 'https://subvid.app',
   output: 'server',
   adapter: node({ mode: 'standalone' }),
+  // Caddy terminates TLS and rewrites Host to localhost:4321, so Astro's
+  // built-in check cannot compare Origin correctly. src/middleware.ts applies
+  // the equivalent guard using Caddy's X-Forwarded-Host/Proto instead.
+  security: {
+    checkOrigin: false,
+  },
   i18n: {
     locales: ['vi'],
     defaultLocale: 'vi',

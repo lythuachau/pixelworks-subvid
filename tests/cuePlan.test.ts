@@ -4,6 +4,10 @@ import {
   materializeCuePlan,
   normalizeCuePlanWords,
 } from "../src/server/cuePlan.ts"
+import {
+  canPlanSubtitleCues,
+  MAX_CUE_PLAN_WORDS,
+} from "../src/scripts/cuePlanClient.ts"
 
 const words = [
   { id: "w1", text: "chào bạn", start: 5.12, end: 5.38 },
@@ -99,4 +103,11 @@ test("word normalizer accepts Groq word/text fields and sorts timestamps", () =>
       { id: "w2", text: "好", start: 0.4, end: 0.6 },
     ],
   )
+})
+
+test("client skips AI cue planning before requests above the server limit", () => {
+  const word = { id: "w", text: "xin chào", start: 0, end: 0.2 }
+  assert.equal(canPlanSubtitleCues(Array(MAX_CUE_PLAN_WORDS).fill(word)), true)
+  assert.equal(canPlanSubtitleCues(Array(MAX_CUE_PLAN_WORDS + 1).fill(word)), false)
+  assert.equal(canPlanSubtitleCues([]), false)
 })

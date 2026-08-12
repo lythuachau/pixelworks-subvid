@@ -1,9 +1,14 @@
 import {
   loadSavedTranslateSettings,
   saveTranslateSettings,
+  TRANSLATE_SETTINGS_CHANGED_EVENT,
+  TRANSLATE_SETTINGS_STORAGE_KEY,
   type TranslateProvider,
 } from "@/scripts/googleTranslateClient.ts"
-import { planAndTranslateSubtitleCues } from "@/scripts/cuePlanClient.ts"
+import {
+  canPlanSubtitleCues,
+  planAndTranslateSubtitleCues,
+} from "@/scripts/cuePlanClient.ts"
 import { createAudioService } from "@/scripts/media/audio.ts"
 import { normalizeLanguageCode } from "@/scripts/subtitles.ts"
 import { transcribeAudioWithGroq } from "@/scripts/speechClient.ts"
@@ -177,6 +182,17 @@ export function createConfigStageController({
         language: sourceHint,
         signal: generationController.signal,
         onProgress: (percent) => setProgress(percent),
+        onChunk: (current, total) => {
+          setStatus(
+            total > 1
+              ? tt("config.groqTranscribingPart", {
+                  current: String(current),
+                  total: String(total),
+                })
+              : tt("config.groqTranscribing"),
+            "busy",
+          )
+        },
       })
       const rawBaseSegments = transcript.segments.map((segment) => ({ ...segment }))
       if (!rawBaseSegments.length) throw new Error(tt("config.groqNoSegments"))
@@ -187,7 +203,7 @@ export function createConfigStageController({
       let baseSegments = rawBaseSegments
       let translated: Segment[] | undefined
       if (targetLang && targetLang !== "same" && targetLang !== sourceLang) {
-        if (transcript.words.length) {
+        if (canPlanSubtitleCues(transcript.words)) {
           try {
             setStatus(tt("config.translatingTo", { lang: targetLang }), "busy")
             const planned = await planAndTranslateSubtitleCues(
@@ -279,8 +295,11 @@ export function createConfigStageController({
     document.querySelector("#config-open-api-btn")?.addEventListener("click", () => {
       document.querySelector<HTMLButtonElement>("#nav-api-tool")?.click()
     })
-    window.addEventListener("subvid:translate-settings-changed", () => {
+    window.addEventListener(TRANSLATE_SETTINGS_CHANGED_EVENT, () => {
       initTranslateSettings()
+    })
+    window.addEventListener("storage", (event) => {
+      if (event.key === TRANSLATE_SETTINGS_STORAGE_KEY) initTranslateSettings()
     })
     initTranslateSettings()
   }

@@ -153,11 +153,58 @@ function defaults(env: TranslateEnv) {
   }
 }
 
-function parseNumbered(text: unknown, count: number) {
+export type ParsedTranslationOutput = {
+  translations: string[]
+  received: number
+  format: "json" | "numbered" | "plain"
+  exact: boolean
+}
+
+function translationValue(value: unknown) {
+  if (typeof value === "string" || typeof value === "number")
+    return String(value).trim()
+  if (value && typeof value === "object" && "text" in value)
+    return String((value as { text?: unknown }).text || "").trim()
+  return ""
+}
+
+export function parseTranslationOutput(
+  text: unknown,
+  count: number,
+): ParsedTranslationOutput {
+  const raw = String(text || "").replace(/\r/g, "").trim()
+  const jsonText = raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim()
+  try {
+    const parsed = JSON.parse(jsonText)
+    const values = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.translations)
+        ? parsed.translations
+        : null
+    if (values) {
+      const received = values.length
+      const translations = Array.from({ length: count }, (_, index) =>
+        translationValue(values[index]),
+      )
+      return {
+        translations,
+        received,
+        format: "json",
+        exact:
+          received === count && translations.every((translation) => translation),
+      }
+    }
+  } catch {
+    // Older and OpenAI-compatible models commonly return numbered text.
+  }
+
   const result = Array.from({ length: count }, () => "")
   const numbered = new Map<number, string>()
-  for (const line of String(text || "").replace(/\r/g, "").split("\n")) {
-    const match = line.match(/^\s*(\d+)\s*[.)：:\-]\s*(.*?)\s*$/)
+  for (const line of raw.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s*[.)、：:\-]\s*(.*?)\s*$/)
     // Models sometimes echo the "(max 84)" length hint back; strip it so the
     // marker never leaks onto the screen.
     if (match)
@@ -166,14 +213,38 @@ function parseNumbered(text: unknown, count: number) {
         match[2].replace(/^\(\s*max\s*\d+\s*\)\s*/i, "").trim(),
       )
   }
-  if (numbered.size >= Math.ceil(count * 0.6)) {
+  if (numbered.size) {
     numbered.forEach((value, index) => {
       if (index >= 0 && index < result.length) result[index] = value
     })
-    return result
+    const received = [...numbered.keys()].filter(
+      (index) => index >= 0 && index < count,
+    ).length
+    return {
+      translations: result,
+      received,
+      format: "numbered",
+      exact: received === count && result.every((translation) => translation),
+    }
   }
-  return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, count)
+
+  const plain = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+  plain.slice(0, count).forEach((value, index) => {
+    result[index] = value
+  })
+  return {
+    translations: result,
+    received: plain.length,
+    format: "plain",
+    exact: plain.length === count && result.every((translation) => translation),
+  }
 }
+
+const TRANSLATE_BATCH_SIZE = 24
+const TRANSLATE_BATCH_CONCURRENCY = 2
 
 export function promptFor(
   texts: string[],
@@ -752,10 +823,9 @@ export async function handleTranslateApi(request: Request, env: TranslateEnv) {
   const requestTimeoutMs = isProbe ? 20_000 : 120_000
   const maxOutputTokens = isProbe ? 256 : 4096
   try {
-    const prompt = promptFor(texts, source, target, budgets)
-    let raw: string
-    let engine: string
-    let model: string
+    let engine = ""
+    let model = ""
+    let callProvider: (prompt: string) => Promise<string>
     if (useCustom) {
       if (!customBase || !customKey || !customModel) return json({ ok: false, error: "not_configured", message: "Custom endpoint, key, and model are required" }, 503)
       const protocol = resolveCustomProtocol(
@@ -763,29 +833,100 @@ export async function handleTranslateApi(request: Request, env: TranslateEnv) {
         customBase,
         customModel,
       )
-      raw = await callCustom(
-        {
-          baseUrl: customBase,
-          apiKey: customKey,
-          model: customModel,
-          protocol,
-        },
-        prompt,
-        requestTimeoutMs,
-        maxOutputTokens,
-      )
-      engine = `custom:${protocol}`; model = customModel
+      callProvider = (prompt) =>
+        callCustom(
+          {
+            baseUrl: customBase,
+            apiKey: customKey,
+            model: customModel,
+            protocol,
+          },
+          prompt,
+          requestTimeoutMs,
+          maxOutputTokens,
+        )
+      engine = `custom:${protocol}`
+      model = customModel
     } else if (useGemini) {
       const key = String(body.geminiApiKey || envString(env, "GEMINI_API_KEY")).trim()
       if (!key) return json({ ok: false, error: "not_configured", message: "Gemini API key is required" }, 503)
       model = String(body.model || envString(env, "GEMINI_TRANSLATE_MODEL") || "gemini-2.5-flash")
-      raw = await callGemini(key, model, prompt, requestTimeoutMs, maxOutputTokens); engine = "gemini"
+      callProvider = (prompt) =>
+        callGemini(key, model, prompt, requestTimeoutMs, maxOutputTokens)
+      engine = "gemini"
     } else {
       return json({ ok: false, error: "not_configured", message: "No translation API configured on the server" }, 503)
     }
-    const translations = parseNumbered(raw, texts.length)
+
+    const batches: number[][] = []
+    for (let offset = 0; offset < texts.length; offset += TRANSLATE_BATCH_SIZE) {
+      batches.push(
+        Array.from(
+          { length: Math.min(TRANSLATE_BATCH_SIZE, texts.length - offset) },
+          (_, index) => offset + index,
+        ),
+      )
+    }
+    const batchResults = await mapWithConcurrency(
+      batches,
+      isProbe ? 1 : TRANSLATE_BATCH_CONCURRENCY,
+      async (indexes) => {
+        const batchTexts = indexes.map((index) => texts[index])
+        const batchBudgets = budgets.length
+          ? indexes.map((index) => budgets[index])
+          : []
+        const translateOnce = async () =>
+          parseTranslationOutput(
+            await callProvider(
+              promptFor(batchTexts, source, target, batchBudgets),
+            ),
+            batchTexts.length,
+          )
+        let parsed = await translateOnce()
+        let retried = false
+        if (!isProbe && !parsed.exact) {
+          retried = true
+          parsed = await translateOnce()
+        }
+        return { indexes, parsed, retried }
+      },
+    )
+    const malformed = batchResults.find(({ parsed }) => !parsed.exact)
+    if (malformed) {
+      return json(
+        {
+          ok: false,
+          error: "invalid_translation_shape",
+          message:
+            `Translation API returned ${malformed.parsed.received}/` +
+            `${malformed.indexes.length} cues after retry.`,
+          expected: malformed.indexes.length,
+          received: malformed.parsed.received,
+          format: malformed.parsed.format,
+          retried: malformed.retried,
+        },
+        502,
+      )
+    }
+    const translations = Array.from({ length: texts.length }, () => "")
+    batchResults.forEach(({ indexes, parsed }) => {
+      indexes.forEach((sourceIndex, translatedIndex) => {
+        translations[sourceIndex] = parsed.translations[translatedIndex]
+      })
+    })
     const missingFinal = translations.map((translation, index) => !translation || translation === texts[index] ? index : -1).filter((index) => index >= 0)
-    return json({ ok: true, engine, model, source, target, translations, missingFinal, strategy: isProbe ? "probe" : "server-numbered" })
+    return json({
+      ok: true,
+      engine,
+      model,
+      source,
+      target,
+      translations,
+      missingFinal,
+      strategy: isProbe ? "probe" : "server-batched",
+      batches: batchResults.length,
+      retries: batchResults.filter(({ retried }) => retried).length,
+    })
   } catch (error) {
     // Structural fallback keeps metadata intact across Worker/bundler realms.
     const candidate = error as Partial<UpstreamApiError> | null

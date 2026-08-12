@@ -20,6 +20,12 @@ export type CuePlanResult = {
   outputCues: number
 }
 
+export const MAX_CUE_PLAN_WORDS = 900
+
+export function canPlanSubtitleCues(words: TimestampedSpeechWord[]) {
+  return words.length > 0 && words.length <= MAX_CUE_PLAN_WORDS
+}
+
 export async function planAndTranslateSubtitleCues(
   words: TimestampedSpeechWord[],
   segments: SubtitleSegment[],

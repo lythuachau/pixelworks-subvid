@@ -3,6 +3,7 @@ import {
   listGeminiModels,
   loadSavedGeminiSettings,
   loadSavedTranslateSettings,
+  notifyTranslateSettingsChanged,
   saveGeminiSettings,
   saveTranslateSettings,
   testTranslateApi,
@@ -318,7 +319,7 @@ export function createApiInspectorController() {
       models: selectedModel ? [selectedModel] : [],
       protocol: (protocol?.value || "auto") as Protocol,
     })
-    window.dispatchEvent(new CustomEvent("subvid:translate-settings-changed"))
+    notifyTranslateSettingsChanged()
   }
 
   function persistGeminiModel() {
@@ -327,7 +328,7 @@ export function createApiInspectorController() {
       model: selectedGeminiModel,
     })
     saveTranslateSettings({ provider: "gemini" })
-    window.dispatchEvent(new CustomEvent("subvid:translate-settings-changed"))
+    notifyTranslateSettingsChanged()
   }
 
   async function saveBackendCustom() {
@@ -416,6 +417,7 @@ export function createApiInspectorController() {
         apiKey: "",
         model: String(gemini.model || ""),
       })
+      notifyTranslateSettingsChanged()
       setProviderTab(data.provider === "gemini" ? "gemini" : "custom")
       if (data.provider === "gemini" && hasSavedGeminiKey) {
         await discoverGemini()

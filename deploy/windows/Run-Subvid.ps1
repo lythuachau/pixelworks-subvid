@@ -62,13 +62,33 @@ $env:TEMP = Join-Path $DataRoot "temp"
 $env:TMP = $env:TEMP
 $env:PATH = "C:\Tools\yt-dlp;C:\Tools\ffmpeg\bin;C:\Program Files\Python312;C:\Program Files\Python312\Scripts;$env:PATH"
 
+function Assert-LoopbackPortAvailable {
+    param([int]$Port)
+
+    $probe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+    try {
+        $probe.Start()
+    }
+    catch {
+        throw "Subvid cannot start because 127.0.0.1:$Port is already in use."
+    }
+    finally {
+        $probe.Stop()
+    }
+}
+
 $current = Join-Path $ServiceRoot "current"
 $entry = Join-Path $current "dist\server\entry.mjs"
 if (-not (Test-Path -LiteralPath $entry -PathType Leaf)) { throw "Subvid server entry is missing." }
+Assert-LoopbackPortAvailable -Port 4321
 Set-Location -LiteralPath $current
 try {
     & "C:\Program Files\nodejs\node.exe" $entry
-    exit $LASTEXITCODE
+    $nodeExitCode = $LASTEXITCODE
+    if ($nodeExitCode -eq 0) {
+        throw "Subvid Node server exited unexpectedly with code 0."
+    }
+    exit $nodeExitCode
 }
 finally {
     Remove-Item Env:\SUBVID_CONFIG_DATA_KEY -ErrorAction SilentlyContinue

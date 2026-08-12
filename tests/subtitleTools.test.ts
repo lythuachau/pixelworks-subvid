@@ -38,6 +38,7 @@ import {
 import {
   handleTranslateApi,
   parseCustomApiResponse,
+  parseTranslationOutput,
   promptFor,
   resolveCustomProtocol,
 } from "../src/server/translateApi.ts"
@@ -347,6 +348,137 @@ test("custom API parser reads Anthropic and OpenAI Responses SSE", () => {
     ),
     "1. Tạm biệt",
   )
+})
+
+test("translation output parser accepts JSON arrays and preserves exact shape", () => {
+  assert.deepEqual(
+    parseTranslationOutput('```json\n["Xin chào", "Cảm ơn"]\n```', 2),
+    {
+      translations: ["Xin chào", "Cảm ơn"],
+      received: 2,
+      format: "json",
+      exact: true,
+    },
+  )
+  assert.deepEqual(
+    parseTranslationOutput('{"translations":["Một", "Hai"]}', 2),
+    {
+      translations: ["Một", "Hai"],
+      received: 2,
+      format: "json",
+      exact: true,
+    },
+  )
+  assert.deepEqual(parseTranslationOutput("Chỉ có một dòng", 2), {
+    translations: ["Chỉ có một dòng", ""],
+    received: 1,
+    format: "plain",
+    exact: false,
+  })
+})
+
+test("translation proxy retries one malformed batch before returning success", async () => {
+  let requests = 0
+  const server = createServer((_request, response) => {
+    requests += 1
+    response.writeHead(200, { "Content-Type": "application/json" })
+    response.end(JSON.stringify({
+      choices: [{
+        message: {
+          content: requests === 1
+            ? "Only one line"
+            : '["Xin chào", "Cảm ơn"]',
+        },
+      }],
+    }))
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address === "object")
+    const response = await handleTranslateApi(
+      new Request("http://subvid.local/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "custom",
+          baseUrl: `http://127.0.0.1:${address.port}`,
+          apiKey: "test-key",
+          model: "llama-test",
+          protocol: "openai",
+          source: "zh",
+          target: "vi",
+          texts: ["你好", "谢谢"],
+        }),
+      }),
+      { ALLOW_PRIVATE_TRANSLATE_ENDPOINT: "1" },
+    )
+    const payload = await response!.json() as any
+    assert.equal(response!.status, 200, JSON.stringify(payload))
+    assert.equal(requests, 2)
+    assert.deepEqual(payload.translations, ["Xin chào", "Cảm ơn"])
+    assert.equal(payload.retries, 1)
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+  }
+})
+
+test("translation proxy splits large requests into stable batches", async () => {
+  let requests = 0
+  const server = createServer((request, response) => {
+    let raw = ""
+    request.setEncoding("utf8")
+    request.on("data", (chunk) => { raw += chunk })
+    request.on("end", () => {
+      requests += 1
+      const body = JSON.parse(raw)
+      const prompt = String(body.messages?.[1]?.content || "")
+      const count = [...prompt.matchAll(/^\d+\. /gm)].length
+      response.writeHead(200, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify(
+              Array.from({ length: count }, (_, index) => `Dịch ${index + 1}`),
+            ),
+          },
+        }],
+      }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address === "object")
+    const response = await handleTranslateApi(
+      new Request("http://subvid.local/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "custom",
+          baseUrl: `http://127.0.0.1:${address.port}`,
+          apiKey: "test-key",
+          model: "llama-test",
+          protocol: "openai",
+          source: "zh",
+          target: "vi",
+          texts: Array.from({ length: 25 }, (_, index) => `Câu ${index + 1}`),
+        }),
+      }),
+      { ALLOW_PRIVATE_TRANSLATE_ENDPOINT: "1" },
+    )
+    const payload = await response!.json() as any
+    assert.equal(response!.status, 200)
+    assert.equal(requests, 2)
+    assert.equal(payload.translations.length, 25)
+    assert.equal(payload.batches, 2)
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+  }
 })
 
 test("translation proxy sends OpenAI Responses request and parses its stream", async () => {
